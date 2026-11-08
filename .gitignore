@@ -1,0 +1,26 @@
+# Only source, documentation and sanitized tests belong here.
+matchflow.local.json
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+work/
+packs/
+references/
+Fallout 3/
+f3check/
+*.sqlite*
+*.db
+*.jsonl
+*.log
+*.exe
+*.dll
+*.obj
+*.pdb
+*.tar*
+*.zip
+api-key
+*secret*
+*credential*

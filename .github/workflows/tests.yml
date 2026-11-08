@@ -1,0 +1,19 @@
+name: Offline tests
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    env:
+      F3_MATCHFLOW_WORKSPACE: ${{ runner.temp }}/matchflow-test-workspace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m unittest discover -s tools/matchflow -v

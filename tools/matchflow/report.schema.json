@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generated one-function evidence report v2",
+  "type": "object",
+  "required": ["schema_version", "address", "claim_id", "session_id", "lane", "model", "variant", "harness", "outcome", "worker_start_utc", "closed_utc", "candidate_path", "source_sha256", "pack_path", "pack_sha256", "checked_flags", "baseline", "final", "latest_valid", "service", "remaining", "elapsed_seconds", "provenance"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "address": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
+    "claim_id": {"type": ["string", "null"], "pattern": "^clm_[A-Za-z0-9]+$"},
+    "session_id": {"type": ["string", "null"], "pattern": "^ses_[A-Za-z0-9]+$"},
+    "lane": {"enum": ["production", "research", "integration"]},
+    "model": {"type": "string"}, "variant": {"type": "string"}, "harness": {"type": "string"},
+    "outcome": {"enum": ["submitted", "flag_review", "given_up", "blocked"]},
+    "worker_start_utc": {"type": "string", "format": "date-time"},
+    "closed_utc": {"type": "string", "format": "date-time"},
+    "candidate_path": {"type": ["string", "null"]},
+    "source_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "pack_path": {"type": ["string", "null"]},
+    "pack_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "checked_flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
+    "baseline": {"$ref": "#/$defs/check"}, "final": {"$ref": "#/$defs/check"}, "latest_valid": {"$ref": "#/$defs/check"},
+    "service": {
+      "type": "object", "required": ["submission_id", "checkpoint_id", "verdict", "acknowledgement_path", "source_retention"],
+      "properties": {
+        "submission_id": {"type": ["string", "null"]}, "checkpoint_id": {"type": ["string", "null"]},
+        "verdict": {"enum": [null, "verified", "unfit", "failed", "needs_review"]},
+        "acknowledgement_path": {"type": ["string", "null"]},
+        "source_retention": {"enum": ["retained", "submitted", "failed", "not_applicable", "unknown"]}
+      }
+    },
+    "remaining": {"type": "array", "items": {"type": "string"}},
+    "elapsed_seconds": {"type": "number", "minimum": 0}, "elapsed_estimated": {"type": "boolean"},
+    "provenance": {"const": "generated_from_lifecycle_and_ledger"}
+  },
+  "$defs": {
+    "check": {
+      "type": ["object", "null"],
+      "required": ["check_id", "status", "valid", "extent", "diffs", "ndiff_insn", "checker", "flags", "source_sha256", "pack_sha256", "evidence_path", "metric_semantics", "diagnostic"],
+      "properties": {
+        "check_id": {"type": "integer", "minimum": 1}, "status": {"type": "string"}, "valid": {"type": "boolean"},
+        "extent": {"type": ["integer", "null"]}, "diffs": {"type": ["integer", "null"]}, "ndiff_insn": {"type": ["integer", "null"]},
+        "checker": {"type": ["string", "null"]}, "flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
+        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "pack_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "evidence_path": {"type": "string"}, "metric_semantics": {"const": "checker_extent_uninterpreted"}, "diagnostic": {"type": "boolean"}
+      }
+    }
+  }
+}
