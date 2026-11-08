@@ -44,7 +44,7 @@ class BatchTests(unittest.TestCase):
             batch.capacity(dict(checked_at=batch.now(), status=status), 2)
 
     def test_all_methods_share_dispatch_lock_and_watchdog(self):
-        for method in ('workflow', 'subagents', 'headless'):
+        for method in ('subagents',):
             with self.subTest(method=method), tempfile.TemporaryDirectory() as directory, \
                     patch.object(batch, 'ROOT', Path(directory)), \
                     patch.object(batch, 'BATCHES', Path(directory)/'batches'):
@@ -53,7 +53,7 @@ class BatchTests(unittest.TestCase):
                 folder = Path(batch.prepare('test', selection)['batch'])
                 status = Path(directory)/'status.json'
                 batch.save(status, dict(checked_at=batch.now(), status=dict(limits=dict(claims=20), open_claims=[])))
-                with patch.object(batch.subprocess, 'Popen') as process:
+                with patch.object(batch.subprocess, 'Popen') as process, patch('preflight.require'):
                     process.return_value.pid = 123
                     batch.dispatch('test', method, status)
                     process.assert_called_once()
@@ -103,7 +103,8 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(assignment['claim_body']['address'], '0x00123456')
             self.assertNotIn('band', assignment['claim_body'])
             self.assertEqual(assignment['claim_body']['effort'], 'max')
-            self.assertEqual(batch.load(folder/'workflow-args.json')['tasks'][0]['model'], batch.DEFAULT_MODEL)
+            self.assertEqual(batch.load(folder/'batch.json')['tasks'][0]['agent'], 'match-worker')
+            self.assertFalse((folder/'workflow-args.json').exists())
             with self.assertRaises(FileExistsError): batch.prepare('test', selection)
             status = Path(directory)/'status.json'
             batch.save(status, dict(checked_at=batch.now(), status=dict(open_claims=[dict(claim_id='unrelated')])) )
@@ -117,7 +118,7 @@ class BatchTests(unittest.TestCase):
     def test_slug_rejects_escape(self):
         with self.assertRaises(ValueError): batch.batch_path('../escape')
 
-    def test_headless_mocked_cli(self):
+    def test_headless_disabled(self):
         class FakeProcess:
             pid = 123
             stdout = io.StringIO('{"sessionID":"ses_test","part":{"type":"text","text":"RESULT mock"}}\n')
@@ -129,21 +130,16 @@ class BatchTests(unittest.TestCase):
             batch.lifecycle.dispatch(path, 'headless')
             batch.lifecycle.tick(path, 'test-watcher')
             with patch.object(batch.subprocess, 'Popen', return_value=FakeProcess()) as launch:
-                result = batch.run_worker(path, task, Path('bundled.exe'))
-                self.assertEqual(launch.call_args.kwargs['cwd'], batch.ROOT)
-                self.assertIn(batch.DEFAULT_MODEL, launch.call_args.args[0])
-                self.assertNotIn('--auto', launch.call_args.args[0])
-            self.assertEqual(result['sessions'], ['ses_test'])
-            self.assertEqual(result['results'], ['RESULT mock'])
-            self.assertTrue(result['cleanup_required'])
-            with self.assertRaises(FileExistsError): batch.run_worker(path, task, Path('bundled.exe'))
+                with self.assertRaisesRegex(ValueError, 'disabled'):
+                    batch.run_worker(path, task, Path('bundled.exe'))
+                launch.assert_not_called()
 
     def test_stop_marker_prevents_start(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory); (path/'STOP').touch()
             with patch.object(batch.subprocess, 'Popen') as launch:
-                result = batch.run_worker(path, dict(id='worker01'), Path('bundled.exe'))
-                self.assertEqual(result['outcome'], 'not_started')
+                with self.assertRaisesRegex(ValueError, 'disabled'):
+                    batch.run_worker(path, dict(id='worker01'), Path('bundled.exe'))
                 launch.assert_not_called()
 
 

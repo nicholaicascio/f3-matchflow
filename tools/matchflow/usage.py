@@ -67,7 +67,7 @@ def collect(folder, method, input_path=None, semantics='unknown'):
         supplied = {a['sessionId']: a.get('usage') for a in snapshot['agents']}
     elif method == 'subagents':
         # Adapter contract for exported session metadata; missing counters stay missing.
-        supplied = {a['session_id']: a.get('raw') for a in snapshot['sessions']}
+        supplied = {a['session_id']: a.get('raw') for a in snapshot['sessions']} if snapshot else {}
     elif method != 'headless':
         raise ValueError('unknown launch method')
     rows = []
@@ -80,12 +80,21 @@ def collect(folder, method, input_path=None, semantics='unknown'):
                     raise ValueError('event session does not match lifecycle')
                 raw = item['raw']
             else:
-                raw = counters(supplied[state['session_id']])
+                if method == 'subagents' and snapshot is None:
+                    saved = life.load(folder/task['id']/'usage-raw.json')
+                    if saved['session_id'] != state['session_id']:
+                        raise ValueError('usage session does not match lifecycle')
+                    tokens = saved.get('raw_session_tokens') or {}
+                    raw = counters(dict(input=tokens.get('input'), output=tokens.get('output'),
+                        reasoning=tokens.get('reasoning'), cacheRead=(tokens.get('cache') or {}).get('read')))
+                else:
+                    raw = counters(supplied[state['session_id']])
             rows.append(dict(worker=task['id'], session_id=state['session_id'], raw=raw,
                              service_usage=normalize(raw, semantics), input_semantics=semantics))
         except (KeyError, ValueError, OSError) as exc:
             rows.append(dict(worker=task['id'], raw=None, service_usage=None, error=str(exc)))
-    result = dict(method=method, captured_utc=life.stamp(), source=str(input_path) if input_path else 'events.jsonl',
+    result = dict(method=method, captured_utc=life.stamp(), source=str(input_path) if input_path else
+                  'bound-session-metadata' if method == 'subagents' else 'events.jsonl',
                   workers=rows, billed_cost=None, billing_note='Not measured; zero harness cost is not a bill.')
     life.save(folder / 'usage.json', result)
     return result

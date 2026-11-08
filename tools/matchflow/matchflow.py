@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 
 import lifecycle
-from config import workspace_root
+from config import workspace_root, REPOSITORY
 
 ROOT = workspace_root()
 DEFAULT_DB = ROOT / "work" / "matchflow" / "ledger.sqlite3"
@@ -265,9 +265,8 @@ def check(db, args):
     source_hash = digest(source)
     pack = load(pack_path / "pack.json")
     requested = flags(args.flags)
-    cmd = ["wsl", "-d", "Ubuntu", "-u", "f3decomp", "--", "bash",
-           wsl_path(ROOT / "check.sh"), "--pack", wsl_path(pack_path),
-           "--claim", args.claim, "--json"]
+    from checker import command
+    cmd = command(["--pack", wsl_path(pack_path), "--claim", args.claim, "--json"])
     if requested:
         cmd += ["--flags", ",".join(requested)]
     for key in ("change", "observed", "why", "expect", "regions"):
@@ -287,7 +286,12 @@ def check(db, args):
     else:
         start = time.monotonic()
         try:
-            run = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            run = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or ''
+            if isinstance(output, bytes):
+                output = output.decode('utf-8', errors='replace')
+            run = subprocess.CompletedProcess(cmd, -1, output, 'checker timed out; reconcile any surviving WSL process')
         except OSError as exc:
             run = subprocess.CompletedProcess(cmd, -1, '', str(exc))
         elapsed = time.monotonic() - start
@@ -507,10 +511,10 @@ def parser():
     a.add_argument("--flags", help="comma-separated complete alternate flags; omission uses pack flags")
     a.add_argument("--evidence-dir")
     a.add_argument('--import-evidence', help='import an exact invocation with hashes, raw output and measured duration')
+    for name in ("change", "observed", "why", "expect", "regions"):
+        a.add_argument("--" + name, help="service work-notes field forwarded to f3check")
     a = sub.add_parser('reclassify', help='orchestrator: route discovered unfit history to integration and invalidate gate')
     a.add_argument('--claim', required=True); a.add_argument('--integration-plan', required=True)
-    for name in ("change", "observed", "why", "expect", "regions"):
-        a.add_argument("--" + name)
     a = sub.add_parser("gate")
     a.add_argument("--claim", required=True)
     a.add_argument("--decision", choices=["continue", "stop"], required=True)

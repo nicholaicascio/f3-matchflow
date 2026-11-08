@@ -1,0 +1,9 @@
+{
+  "name": "f3-matchflow-opencode",
+  "private": true,
+  "version": "3.0.0",
+  "type": "module",
+  "exports": { ".": "./index.mjs" },
+  "devDependencies": { "@opencode/plugin": "2.2.6" },
+  "scripts": { "test": "node --test" }
+}

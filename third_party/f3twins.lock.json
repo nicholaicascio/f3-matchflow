@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/mathisto/f3twins",
+  "commit": "e3f27bb08b462be0d209e1a59deb59cb8b7782cb",
+  "license": "MIT",
+  "files": {
+    "f3twins.py": "4894e8a48444463eef821bb826a807f176235c1819b64bdc09297107d3468225",
+    "seeds.json": "ca1ea107aea383a5ed7ec689618b263a46202ad29311abc427ca931e73c8e5b1",
+    "LICENSE": "393927a62005d0c47407246c80966bf3908bff4a80a9006905f24769978db304",
+    "MATCHING_TIPS.md": "a4989a2c475e28011715f1712efdac52fcfc8b4c5b58d5e937e4923cda470c8d",
+    "PLAYBOOK.md": "93703c11059c24eeac311a4378b90e24f5cccf9277809ece5bf15101d7b82342"
+  }
+}

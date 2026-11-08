@@ -1,71 +1,62 @@
 # f3-matchflow
 
-Private, version-controlled orchestration tooling for the f3decomp workspace.
-The repository contains pipeline code, offline tests, a report schema and an
-OpenChamber workflow. It does **not** contain the game, checker/toolchain,
-context packs, claim sources, credentials, databases or runtime artifacts.
+Private orchestration tooling for f3decomp. **Our code, policy, prompts, wrappers and
+tests live here.** The external git-free workspace contains official dependencies,
+the contributor's game and generated private runtime artifacts, not another pipeline.
 
-## Configure the separate workspace
+## Restricted subagents
 
-Requires Python 3.10+; offline tests use only the standard library. Actual matching
-also requires the separately provisioned workspace, WSL/Wine, official checker and
-compiler, and OpenChamber's bundled OpenCode.
+The orchestrator screens and assigns one exact function per worker. `matchflow_launch`
+creates a dedicated `match-worker` child, binds its real session, claims just in time,
+obtains the exact pack and registers evidence before sending the prepared prompt.
 
-Set `F3_MATCHFLOW_WORKSPACE` to the absolute external workspace path, or create
-ignored `matchflow.local.json` in this checkout:
+Workers have only session-scoped matching tools: own-folder candidate edits, read-only
+pack/references, managed official checks and own-claim checkpoints/closure. No general
+shell, raw service credentials, target selection, sibling access or tooling edits.
+Both permission rules and host-side capabilities enforce the boundary. This is not an
+OS sandbox. Legacy general/headless/Workflow matching launch paths are disabled.
+
+## Setup
+
+Requires Python 3.10+, Node 22+, OpenCode V2 (tested SDK/CLI 2.2.6), and the separately
+installed official checker/compiler plus WSL/Wine on Windows. Configure ignored local
+`matchflow.local.json` with an external absolute workspace, e.g.:
 
 ```json
 {"workspace":"F:/Games/f3decomp"}
 ```
 
-The environment variable takes precedence. Missing configuration, relative paths
-and workspaces inside this repository are rejected. No runtime payload belongs in
-the checkout. Credentials remain outside both source control and the workspace;
-only the explicit service gateway reads the existing private key file.
+`F3_MATCHFLOW_WORKSPACE` overrides that path. Runtime data and credentials may not live
+in this repository. Credentials default to the existing private OS-local key file.
 
-## OpenChamber orchestrator setup
-
-Moving a session to this Git checkout does not inherit the old workspace's OpenCode
-configuration or `AGENTS.md`. After configuring the workspace, run:
-
-```powershell
+```text
+npm ci --ignore-scripts --prefix integrations/opencode
 python tools/matchflow/bootstrap.py
+python tools/matchflow/preflight.py --online
 ```
 
-This creates ignored local `opencode.jsonc` that loads the workspace matching policy
-and official service guide and connects the f3decomp MCP server. It references the
-existing private credential file; it never reads or copies the key. Custom project
-configs are not overwritten. Use `--key-file` for a non-default credential location.
-Check `/mcps` for connection status; use `/reload` if needed to refresh an existing
-session. A fresh session must see matching instructions and service discovery tools
-before selecting targets. No claims or workers are started by setup.
+Bootstrap writes the ignored local OpenCode bridge, loading repository policy, official
+service guide, local plugin and external key-file reference. It preserves custom
+configuration. No setup/test command starts paid workers or takes real claims.
 
-## Test
+See [command reference](tools/matchflow/README.md) for configuration, central selection,
+subagent dispatch, safe recovery and optional pinned f3twins integration. Canonical local
+policy is [docs/matching-policy.md](docs/matching-policy.md); matching techniques load
+on demand from [docs/matching-recipes.md](docs/matching-recipes.md). Official contribution
+rules at https://f3decomp.com/agents.md take precedence.
 
-```powershell
+## Source boundaries and tests
+
+Tracked: source, sanitized fixtures, policy, templates, dependency locks and CI.
+Ignored/external: packs, game/toolchain, sources under claim, raw output/disassembly,
+databases, logs, keys and caches. Public optional dependencies install under `.deps`;
+their derived private data stays in the external workspace. Never stage private files.
+Workspace junctions/deployed workflow copies are no longer required or authoritative.
+
+```text
 python -m unittest discover -s tools/matchflow -v
+npm test --prefix integrations/opencode
 ```
 
-For a fresh checkout/CI without local configuration, point the environment variable
-at an external scratch workspace before running tests. Tests mock compiler/network
-operations; they do not establish live service or game integration.
-
-## Run
-
-Invoke scripts by their absolute checkout path, from the configured workspace.
-Generated worker prompts also use absolute pipeline paths, so code and runtime
-data can live on different drives. See the [command reference](tools/matchflow/README.md).
-
-An existing workspace may retain a directory junction from `tools/matchflow` to
-this checkout's `tools/matchflow`. This is a compatibility entry point, not a second
-source copy. The workspace's `.openchamber/workflows/match-batch.js` is a deployed
-copy of the tracked workflow: redeploy it after changes, only with workers stopped.
-Workspace policies remain in that workspace's `AGENTS.md`; repository instructions
-do not replace the service rules or the matching policies.
-
-## Source control boundaries
-
-Only source/docs, sanitized offline tests, schema, workflow and CI are tracked.
-Do not stage from the private workspace or import historical reports as fixtures.
-Review `git diff --cached` and `git status` before every push. `.gitignore` is a
-convenience guard, not permission to store sensitive material or use `git add -f`.
+CI tests Python on Windows/Linux and the pinned OpenCode plugin SDK. Live matching is
+separate from offline verification and requires an explicit matching request.

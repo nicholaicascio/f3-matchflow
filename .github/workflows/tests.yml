@@ -17,3 +17,12 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tools/matchflow -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: integrations/opencode/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: integrations/opencode
+      - run: npm test
+        working-directory: integrations/opencode

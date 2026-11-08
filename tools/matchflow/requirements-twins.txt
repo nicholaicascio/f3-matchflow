@@ -1,0 +1,2 @@
+# Optional twin-finder dependency. Install into a repository-local virtualenv.
+capstone==5.0.6

@@ -1,13 +1,10 @@
 """Shared fixed-address assignment pipeline. No service writes or credentials."""
 import argparse
-import concurrent.futures as futures
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
-import threading
 import time
 import sys
 import uuid
@@ -90,27 +87,10 @@ def batch_path(name):
 
 
 def prompt_for(assignment):
-    folder, worker = assignment.parent.parent.as_posix(), assignment.parent.name
-    prompt = (f'Read {ROOT.as_posix()}/AGENTS.md, tools/matchflow/README.md and {assignment.as_posix()}. '
-            f'Work from {ROOT.as_posix()}. Execute only that fixed-address assignment; no delegation/refills. '
-            f'Lifecycle is already dispatched by the orchestrator. First run python tools/matchflow/lifecycle.py '
-            f'guard "{folder}" {worker}. Claim ONCE through python tools/matchflow/service.py claim '
-            f'"{folder}" {worker}, never through direct MCP/REST claim calls. Never reclaim after release. '
-            'Read its saved claim-response.json for pack/history; register the claim in Matchflow with '
-            f'--assignment "{assignment.as_posix()}". Use managed Matchflow checks only, not direct compiler/checker '
-            'bypasses. Read lifecycle guard before each new hypothesis; CLOSE_REQUESTED.json means freeze and close. '
-            'Do not infer elapsed time from service timestamps or write your own ownership/start times. '
-            'Use service.py giveup with --source and --notes, service.py submit after accepted final MATCH/promotion, '
-            'or service.py flag-proof after an exact diagnostic MATCH promoted to proof_ready. '
-            'Do not pass note-only checkpoint IDs for best code. Save required closing work notes through official '
-            'checkpoint after closure. Generate report with python tools/matchflow/evidence.py report '
-            f'"{folder}" {worker}. If a call fails ambiguously, do not retry mutation: preserve evidence and '
-            'report cleanup_required for the orchestrator. If prior unfit is discovered, stop and ask orchestrator '
-            'to reclassify the owned assignment to integration before submitting. '
-            'Final response: one RESULT line with address, outcome, report path, claim ID and cleanup_required.')
-    prompt = re.sub(r'python tools/matchflow/([a-z]+\.py)',
-                    lambda match: 'python "' + (CODE / match.group(1)).as_posix() + '"', prompt)
-    return prompt.replace('tools/matchflow/README.md', (CODE / 'README.md').as_posix())
+    from string import Template
+    target = load(assignment)['target']
+    return Template((CODE/'prompts/worker.txt').read_text(encoding='utf-8')).substitute(
+        address=target['address'], lane=target['lane'], reason=target['reason'])
 
 
 def prepare(name, selection_path, model=DEFAULT_MODEL):
@@ -136,19 +116,21 @@ def prepare(name, selection_path, model=DEFAULT_MODEL):
         worker = path / f'worker{i:02}'
         worker.mkdir()
         assignment = worker / 'assignment.json'
+        (worker/'files').mkdir()
         claim_body = dict(address=target['address'], cowork=False, context_mode='resume',
                           model=model.split('#')[0], harness='OpenCode')
         if '#' in model:
             claim_body['effort'] = model.split('#', 1)[1]
-        save(assignment, dict(schema_version=2, worker=i, model=model, harness='OpenCode', target=target,
+        save(assignment, dict(schema_version=3, worker=i, model=model, harness='OpenCode', target=target,
                              workspace=str(ROOT), output_dir=str(worker), selection_checked_at=selection['checked_at'],
                              claim_body=claim_body))
         prompt = prompt_for(assignment)
         (worker/'prompt.txt').write_text(prompt, encoding='utf-8')
-        tasks.append(dict(id=worker.name, address=target['address'], model=model, prompt=prompt))
-    manifest = dict(schema_version=2, batch=name, created=now(), model=model, selection=selection, tasks=tasks)
+        from matchflow import digest
+        tasks.append(dict(id=worker.name, address=target['address'], model=model, agent='match-worker',
+                          assignment_sha256=digest(assignment), prompt=prompt))
+    manifest = dict(schema_version=3, batch=name, created=now(), model=model, selection=selection, tasks=tasks)
     save(path/'batch.json', manifest)
-    save(path/'workflow-args.json', dict(schema_version=2, batch=name, lifecycle_dispatch_required=True, tasks=tasks))
     return dict(batch=str(path), count=len(tasks), model=model)
 
 
@@ -165,18 +147,15 @@ def capacity(snapshot, count):
         raise ValueError('Insufficient pending verification capacity; do not launch')
 
 
-def bundled_cli():
-    path = Path(os.environ['LOCALAPPDATA']) / 'Programs/@openchamberelectron/resources/opencode-cli/opencode.exe'
-    if not path.is_file():
-        raise ValueError('Bundled CLI not found: discover the active OpenChamber installation; do not use PATH opencode')
-    return path
-
-
 def dispatch(name, method, status_path):
+    if method != 'subagents':
+        raise ValueError('only restricted subagents are enabled; legacy launches are unsafe')
     path = batch_path(name)
     manifest = load(path / 'batch.json')
-    if manifest.get('schema_version') != 2:
-        raise ValueError('legacy batch cannot launch; prepare reviewed v2 assignments')
+    if manifest.get('schema_version') != 3:
+        raise ValueError('legacy batch cannot launch; prepare reviewed v3 assignments')
+    from preflight import require
+    require()
     validate_selection(manifest['selection'])
     capacity(load(status_path), len(manifest['tasks']))
     result = lifecycle.dispatch(path, method)
@@ -219,90 +198,11 @@ def monitor(name):
 
 
 def run_worker(path, task, cli):
-    worker = path/task['id']
-    if (path/'STOP').exists():
-        return dict(worker=task['id'], outcome='not_started', reason='STOP marker present')
-    lock = worker/'started.json'
-    with lock.open('x', encoding='utf-8') as f:
-        json.dump(dict(started=now(), method='headless'), f)
-    lifecycle.require_experiment(path, task['id'])
-    started = time.monotonic()
-    run = dict(worker=task['id'], address=task['address'], started=now(), model=task['model'], sessions=[], results=[])
-    out = (worker/'events.jsonl').open('w', encoding='utf-8')
-    err = (worker/'stderr.log').open('w', encoding='utf-8')
-    process = subprocess.Popen([str(cli), 'run', '-m', task['model'], '--format', 'json',
-                                '--title', f"{path.name} {task['id']}", task['prompt']],
-                               cwd=ROOT, stdout=subprocess.PIPE, stderr=err, text=True, encoding='utf-8', errors='replace')
-    run['pid'] = process.pid
-    save(worker/'run.json', run)
-
-    def capture():
-        try:
-            for line in process.stdout:
-                out.write(line)
-                out.flush()
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                sid = event.get('sessionID')
-                if sid and sid not in run['sessions']:
-                    run['sessions'].append(sid)
-                    lifecycle.bind(path, task['id'], sid)
-                    save(worker/'run.json', run)
-                if event.get('type') == 'error':
-                    (path/'STOP').touch()
-                part = event.get('part') or {}
-                if part.get('type') == 'text':
-                    run['results'] += [s for s in part.get('text', '').splitlines() if s.startswith('RESULT')]
-        except Exception as exc:
-            run['capture_error'] = str(exc)
-            (path/'STOP').touch()
-        finally:
-            out.close()
-
-    reader = threading.Thread(target=capture, daemon=True)
-    reader.start()
-    try:
-        state = lifecycle.snapshot(path, task['id'])
-        remaining = max(0, state['closure_seconds'] - (time.monotonic()-state['monotonic_start']))
-        run['exit_code'] = process.wait(timeout=remaining)
-        reader.join(timeout=5)
-    except subprocess.TimeoutExpired:
-        run['timeout'] = True
-        run['warning'] = 'Reconcile session/owned claim now. CLI not killed; server session may still be active.'
-    run.update(elapsed_seconds=time.monotonic()-started, cleanup_required=True)
-    # Conservative until the orchestrator verifies official status; exit 0 is not closure.
-    save(worker/'run.json', run)
-    err.close()
-    # Same raw-counter collector used by the other two transports. Missing or
-    # malformed events remain explicit errors, never fabricated zero usage.
-    from usage import headless_events
-    try:
-        save(worker/'usage-raw.json', headless_events(worker/'events.jsonl'))
-    except (ValueError, KeyError, OSError) as exc:
-        save(worker/'usage-raw.json', dict(raw=None, error=str(exc)))
-    return run
+    raise ValueError('legacy headless workers disabled; use matchflow_launch restricted subagents')
 
 
 def headless(name, status_path, jobs):
-    path = batch_path(name)
-    manifest = load(path/'batch.json')
-    validate_selection(manifest['selection'])
-    capacity(load(status_path), len(manifest['tasks']))
-    if jobs <= 0:
-        raise ValueError('jobs must be positive')
-    cli = bundled_cli()
-    dispatch(name, 'headless', status_path)
-    with futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        pending = [pool.submit(run_worker, path, task, cli) for task in manifest['tasks']]
-        for task in futures.as_completed(pending):
-            try:
-                result = task.result()
-            except Exception as exc:
-                result = dict(error=str(exc), cleanup_required=True)
-            print(json.dumps(result), flush=True)
-    print('Reconcile this batch against fresh official status; no automatic remote cleanup or retries.', flush=True)
+    raise ValueError('legacy headless workers disabled; use matchflow_launch restricted subagents')
 
 
 def audit(name, status_path):

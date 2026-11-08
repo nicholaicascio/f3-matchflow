@@ -21,7 +21,9 @@ class BootstrapTests(unittest.TestCase):
     def test_bridge_loads_policy_and_mcp_without_reading_key(self):
         with patch.object(Path, 'read_text', side_effect=AssertionError('must not read credential')):
             config = bootstrap.bridge(self.workspace, self.key)
-        self.assertIn((self.workspace/'AGENTS.md').as_posix(), config['instructions'])
+        self.assertIn((bootstrap.REPOSITORY/'docs/matching-policy.md').as_posix(), config['instructions'])
+        self.assertNotIn((self.workspace/'AGENTS.md').as_posix(), config['instructions'])
+        self.assertIn('plugins', config)
         server = config['mcp']['servers']['f3decomp']
         self.assertEqual(server['url'], 'https://f3decomp.com/mcp')
         self.assertEqual(server['headers']['Authorization'], 'Bearer {file:' + self.key.as_posix() + '}')
@@ -43,8 +45,22 @@ class BootstrapTests(unittest.TestCase):
             bootstrap.install(self.repo, self.workspace, self.key)
 
     def test_missing_policy_blocks_incomplete_setup(self):
-        with self.assertRaisesRegex(ValueError, 'AGENTS.md'):
+        with self.assertRaisesRegex(ValueError, 'workspace'):
             bootstrap.bridge(self.base/'absent', self.key)
+
+    def test_key_in_workspace_is_rejected(self):
+        key = self.workspace/'private-key'; key.touch()
+        with self.assertRaisesRegex(ValueError, 'runtime workspace'):
+            bootstrap.bridge(self.workspace, key)
+
+    def test_exact_legacy_bridge_migrates_with_backup(self):
+        config = bootstrap.bridge(self.workspace, self.key)
+        config.pop('plugins')
+        config['instructions'] = [(self.workspace/'AGENTS.md').as_posix(), 'https://f3decomp.com/agents.md']
+        path = self.repo/'opencode.jsonc'; path.write_text(json.dumps(config))
+        bootstrap.install(self.repo, self.workspace, self.key)
+        self.assertTrue(path.with_suffix('.jsonc.v2-backup').exists())
+        self.assertIn('plugins', json.loads(path.read_text()))
 
 
 if __name__ == '__main__':

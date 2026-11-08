@@ -5,34 +5,10 @@ import json
 import hashlib
 import os
 from pathlib import Path
-import urllib.error
-import urllib.request
+from transport import ServiceError, request
 
 import lifecycle as life
 import matchflow as ledger
-
-
-class ServiceError(ValueError):
-    def __init__(self, code, retry_after):
-        self.code = code
-        super().__init__('service HTTP %s; Retry-After=%s; no automatic retry' % (code, retry_after))
-
-
-def request(tool, body):
-    # Deliberately not configurable to an arbitrary host: never forward the key.
-    key = (Path(os.environ['LOCALAPPDATA']) / 'f3decomp' / 'api-key').read_text().strip()
-    req = urllib.request.Request('https://f3decomp.com/api/v1/' + tool,
-                                 data=json.dumps(body).encode('utf-8'),
-                                 headers={'Authorization': 'Bearer ' + key,
-                                          'Content-Type': 'application/json'}, method='POST')
-    try:
-        with urllib.request.urlopen(req, timeout=90) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        # Error bodies can contain submitted source. Keep them out of chat/logs.
-        raise ServiceError(exc.code, exc.headers.get('Retry-After', 'unspecified')) from None
-    except (urllib.error.URLError, TimeoutError):
-        raise ValueError('service transport failed; outcome ambiguous, reconcile without retry') from None
 
 
 def owned(status, claim, address):

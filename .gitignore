@@ -28,3 +28,6 @@ f3check/
 api-key
 *secret*
 *credential*
+node_modules/
+.deps/
+opencode.jsonc.*-backup

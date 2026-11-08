@@ -8,11 +8,11 @@ separate and retains its own matching policies, game installation and artifacts.
 This checkout is also a valid orchestrator location when the user requests matching
 work. "Code only" describes the Git boundary, not a prohibition on orchestration.
 Before selecting targets, resolve the external workspace from `matchflow.local.json`
-or `F3_MATCHFLOW_WORKSPACE` and read that workspace's `AGENTS.md`. It is the canonical
-matching policy, including selection, model, timebox and closure rules. Do not try
-to reconstruct those rules from this repository's development instructions alone.
+or `F3_MATCHFLOW_WORKSPACE`. Read `docs/matching-policy.md`, the canonical local
+matching policy. The official service guide remains authoritative on contribution
+rules. Workspace AGENTS.md is legacy environment context, not the policy source.
 
-The local OpenCode bridge loads the workspace policy and official service guide,
+The local OpenCode bridge loads the repository policy and official service guide,
 and connects the `f3decomp` MCP server using an external key-file reference. On a
 fresh installation run `python tools/matchflow/bootstrap.py` after configuring the
 workspace. If service tools are absent, report the missing bridge/connection, not
@@ -24,6 +24,12 @@ availability, history and reports under the workspace policy, select exact addre
 then prepare reviewed selection/status JSON and use the pipeline command reference.
 Code/configuration tests never authorize claims or paid worker launches. Start those
 only when the user requests them. Keep all runtime artifacts in the external workspace.
+
+Matching launches use `matchflow_launch` and the dedicated `match-worker` agent only.
+The host binds each child session before its first prompt. Do not dispatch matching
+through general subagents, headless CLI or Workflows; those legacy paths are disabled.
+Workers have no shell or raw service access. All edits/checks go through session-scoped
+tools. Never broaden permissions or edit tooling to work around a worker refusal.
 
 ## Pipeline development
 
