@@ -23,6 +23,23 @@ and workspaces inside this repository are rejected. No runtime payload belongs i
 the checkout. Credentials remain outside both source control and the workspace;
 only the explicit service gateway reads the existing private key file.
 
+## OpenChamber orchestrator setup
+
+Moving a session to this Git checkout does not inherit the old workspace's OpenCode
+configuration or `AGENTS.md`. After configuring the workspace, run:
+
+```powershell
+python tools/matchflow/bootstrap.py
+```
+
+This creates ignored local `opencode.jsonc` that loads the workspace matching policy
+and official service guide and connects the f3decomp MCP server. It references the
+existing private credential file; it never reads or copies the key. Custom project
+configs are not overwritten. Use `--key-file` for a non-default credential location.
+Check `/mcps` for connection status; use `/reload` if needed to refresh an existing
+session. A fresh session must see matching instructions and service discovery tools
+before selecting targets. No claims or workers are started by setup.
+
 ## Test
 
 ```powershell

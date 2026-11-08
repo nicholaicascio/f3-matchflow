@@ -1,5 +1,9 @@
 # Only source, documentation and sanitized tests belong here.
 matchflow.local.json
+opencode.json
+opencode.jsonc
+.opencode/opencode.json
+.opencode/opencode.jsonc
 .env
 .env.*
 __pycache__/
