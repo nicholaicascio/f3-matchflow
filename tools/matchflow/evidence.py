@@ -8,7 +8,9 @@ import sqlite3
 
 import lifecycle as life
 import matchflow as ledger
-from service import acknowledgement
+from service import acknowledgement, closing_notes_record, owned
+
+REPORT_VERSION = 3
 
 
 def schema_errors(value, schema, root=None, path='$'):
@@ -74,6 +76,50 @@ def check_record(db, row):
                 diagnostic=not result.get('normal_flags', False))
 
 
+def has_attempt(db_path, claim):
+    path = Path(db_path)
+    if not path.is_file():
+        return False
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)) as db:
+        return db.execute('SELECT 1 FROM attempts WHERE claim_id=?', (claim,)).fetchone() is not None
+
+
+def setup_failure_record(folder, worker, state, ack, db_path):
+    """A missing ledger is valid ONLY for an evidenced pre-registration failure."""
+    folder = Path(folder)
+    failure = state.get('setup_failure')
+    if (state.get('state') != 'closed' or state.get('setup_state') != 'failed' or
+            not isinstance(failure, dict) or failure.get('stage') not in ('claim', 'packet', 'pack', 'register') or
+            state.get('outcome') != 'given_up' or ack.get('operation') != 'giveup' or
+            ack.get('claim_id') != state.get('claim_id') or ack.get('address') != state.get('address') or
+            ack.get('source_sha256') or not ack.get('no_source_reason') or
+            acknowledgement(ack['response'], 'giveup')['lease_closed'] is not True):
+        raise ValueError('missing ledger is not an acknowledged pre-registration setup failure')
+    if life.load(folder/worker/'SETUP_FAILED.json') != failure:
+        raise ValueError('setup failure marker differs from host lifecycle')
+    if has_attempt(db_path, state['claim_id']):
+        raise ValueError('registered attempts require ordinary ledger/check evidence')
+    if not life.timestamp(state['worker_start_utc']) <= life.timestamp(failure['failed_utc']) <= life.timestamp(state['closed_utc']):
+        raise ValueError('invalid setup failure timestamp')
+    confirmed = False
+    for name in ('claim-status.json', 'reconcile-status.json'):
+        path = folder/worker/name
+        if not path.is_file():
+            continue
+        snapshot = life.load(path)
+        try:
+            lease = owned(snapshot['status'], state['claim_id'], state['address'])
+            when = life.timestamp(snapshot['checked_at'])
+            if (life.timestamp(state['worker_start_utc']) <= when <= life.timestamp(state['closed_utc']) and
+                    abs((life.timestamp(lease['expires'])-life.timestamp(state['deadline_utc'])).total_seconds()) <= 0.001):
+                confirmed = True
+        except (ValueError, KeyError, TypeError):
+            continue
+    if not confirmed:
+        raise ValueError('setup failure lacks a saved official own-claim confirmation')
+    return failure
+
+
 def report(folder, worker, db_path=ledger.DEFAULT_DB):
     folder = Path(folder)
     state = life.snapshot(folder, worker)
@@ -81,28 +127,45 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
     if state['state'] != 'closed':
         raise ValueError('closure acknowledgement required before generating a completed report')
     if state.get('outcome') == 'blocked' and state.get('claim_attempted') is False:
-        value = dict(schema_version=2, address=state['address'], claim_id=None, session_id=state['session_id'],
+        value = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=None, session_id=state['session_id'],
                      lane=assignment.get('target', {}).get('lane', 'research'), model=assignment['claim_body']['model'],
                      variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'], outcome='blocked',
                      worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
                      elapsed_seconds=state['elapsed_seconds'],
                      elapsed_estimated=False, candidate_path=None, source_sha256=None, pack_path=None, pack_sha256=None,
                      checked_flags=[], baseline=None, final=None, latest_valid=None,
-                     service=dict(submission_id=None, checkpoint_id=None, verdict=None, acknowledgement_path=None,
-                                  source_retention='not_applicable'), remaining=[state['blocked_reason']],
+                      service=dict(submission_id=None, checkpoint_id=None, verdict=None, acknowledgement_path=None,
+                                   source_retention='not_applicable'), remaining=[state['blocked_reason']],
+                      setup_failure=None, closing_notes=closing_notes_record(folder, worker, state),
                      provenance='generated_from_lifecycle_and_ledger')
         life.save(folder / worker / 'report.json', value)
         return value
+    notes = closing_notes_record(folder, worker, state)
     ack = life.load(state['service_ack_path'])
     with closing(ledger.connect(db_path)) as db:
-        row = ledger.attempt(db, state['claim_id'])
+        row = db.execute('SELECT * FROM attempts WHERE claim_id=?', (state['claim_id'],)).fetchone()
+        if row is None:
+            failure = setup_failure_record(folder, worker, state, ack, db_path)
+            result = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=state['claim_id'], session_id=state['session_id'],
+                          lane=assignment['target']['lane'], model=assignment['claim_body']['model'],
+                          variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'], outcome='given_up',
+                          worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
+                          elapsed_seconds=state['elapsed_seconds'], elapsed_estimated=False,
+                          candidate_path=None, source_sha256=None, pack_path=None, pack_sha256=None,
+                          checked_flags=[], baseline=None, final=None, latest_valid=None,
+                          service=dict(submission_id=None, checkpoint_id=None, verdict=None,
+                                       acknowledgement_path=state['service_ack_path'], source_retention='not_applicable'),
+                          setup_failure=failure, closing_notes=notes, remaining=[ack['no_source_reason']],
+                          provenance='generated_from_lifecycle_and_service_receipts')
+            life.save(folder/worker/'report.json', result)
+            return result
         checks = db.execute('SELECT * FROM checks WHERE claim_id=? ORDER BY id', (state['claim_id'],)).fetchall()
         baseline = next((c for c in reversed(checks) if c['valid'] and c['stage'] == 'baseline'), None)
         final = next((c for c in reversed(checks) if c['valid'] and c['stage'] == 'final'), None)
         latest = next((c for c in reversed(checks) if c['valid']), None)
         source = folder / worker / 'closure-source.cpp'
         elapsed = state['elapsed_seconds']
-        result = dict(schema_version=2, address=state['address'], claim_id=state['claim_id'],
+        result = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=state['claim_id'],
                       lane=row['lane'], model=assignment['claim_body']['model'],
                       variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'],
                       outcome=state['outcome'], session_id=state['session_id'],
@@ -119,6 +182,7 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
                                    verdict=None, acknowledgement_path=state['service_ack_path'],
                                    source_retention=state['handoff']),
                       remaining=[], provenance='generated_from_lifecycle_and_ledger')
+        result.update(closing_notes=notes, setup_failure=None)
         life.save(folder / worker / 'report.json', result)
     return result
 
@@ -170,6 +234,8 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
             if (value.get('outcome') != 'blocked' or value.get('address') != task['address'] or
                     value.get('claim_id') is not None or state['address'] != task['address']):
                 errors.append('blocked report differs from unclaimed assignment')
+            if value.get('closing_notes') != closing_notes_record(folder, task['id'], state):
+                errors.append('blocked closing notes state differs from unclaimed assignment')
             if not life.timestamp(state['worker_start_utc']) <= life.timestamp(state['closed_utc']) <= life.utc():
                 errors.append('blocked timestamps inconsistent')
         except (ValueError, KeyError, TypeError, OSError) as exc:
@@ -223,6 +289,11 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
                     verification = matches[0].get('verdict') or 'pending'
     except (ValueError, KeyError, TypeError, OSError) as exc:
         errors.append('acknowledgement: ' + str(exc))
+    notes = None
+    try:
+        notes = closing_notes_record(folder, task['id'], state)
+    except ValueError as exc:
+        errors.append(str(exc))
     try:
         value = life.load(worker / 'report.json')
         schema = life.load(Path(__file__).with_name('report.schema.json'))
@@ -245,6 +316,22 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
             errors.append('report timestamps/duration differ from lifecycle')
         if value['outcome'] != state.get('outcome'):
             errors.append('report outcome differs from lifecycle')
+        if value.get('closing_notes') != notes:
+            errors.append('report closing notes differ from acknowledged receipt')
+        if value.get('setup_failure') is not None:
+            expected = setup_failure_record(folder, task['id'], state, ack, db_path)
+            if value['setup_failure'] != expected or value['provenance'] != 'generated_from_lifecycle_and_service_receipts':
+                errors.append('report setup failure differs from host evidence')
+            if (any(value.get(k) is not None for k in ('candidate_path', 'source_sha256', 'pack_path', 'pack_sha256',
+                                                       'baseline', 'final', 'latest_valid')) or value['checked_flags'] or
+                    value['service']['submission_id'] is not None or value['service']['checkpoint_id'] is not None or
+                    value['service']['source_retention'] != 'not_applicable' or
+                    value['service']['acknowledgement_path'] != state['service_ack_path']):
+                errors.append('setup failure invents source/pack/check/submission evidence')
+            return dict(lease_closure=lease, evidence_integrity='invalid' if errors else 'valid',
+                        source_handoff=handoff, verification=verification, evidence_errors=errors)
+        if value['provenance'] != 'generated_from_lifecycle_and_ledger':
+            errors.append('ordinary attempt requires ledger provenance')
         pack = resolve(value['pack_path'], worker)
         assignment = life.load(worker / 'assignment.json')
         if pack.resolve() != (Path(assignment['workspace']) / 'packs' / claim).resolve():
@@ -277,7 +364,7 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
                     value['service'].get('checkpoint_id') != ack.get('checkpoint_id') or
                     value['service'].get('flag_id') != ack['response'].get('flag_id')):
                 errors.append('flag proof lacks exact diagnostic MATCH/checkpoint/receipt linkage')
-    except (ValueError, KeyError, TypeError, OSError) as exc:
+    except (ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
         errors.append('report: ' + str(exc))
     return dict(lease_closure=lease, evidence_integrity='invalid' if errors else 'valid',
                 source_handoff=handoff, verification=verification, evidence_errors=errors)

@@ -157,27 +157,58 @@ def progress(folder, worker, flags=None, metric=None, register_wall=False, evide
     return state
 
 
-def require_experiment(folder, worker):
-    with transaction(folder) as db:
-        state = read_worker(db, worker)
-        row = db.execute('SELECT payload FROM control WHERE id=1').fetchone()
-        control = json.loads(row['payload'])
-        heartbeat = control.get('heartbeat')
-        if heartbeat is None or not 0 <= time.monotonic() - heartbeat <= 30:
-            raise ValueError('watchdog missing/stale; closure only, do not resume experiments')
-        if state['state'] not in ('dispatched', 'claimed') or phase(state) != 'experiment':
-            raise ValueError('assignment is closed, ambiguous or out of experiment time')
-        if (Path(folder) / worker / 'CLOSE_REQUESTED.json').exists():
-            raise ValueError('closure requested; no more experiments')
-        if (Path(folder) / 'STOP').exists():
-            raise ValueError('batch STOP requested; closure only')
+def experiment_state(db, folder, worker):
+    state = read_worker(db, worker)
+    control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+    if control.get('cleanup_barrier'):
+        raise ValueError('batch cleanup barrier active; reconcile, no new starts or checks')
+    heartbeat = control.get('heartbeat')
+    if heartbeat is None or not 0 <= time.monotonic() - heartbeat <= 30:
+        raise ValueError('watchdog missing/stale; closure only, do not resume experiments')
+    if state['state'] not in ('dispatched', 'claimed') or phase(state) != 'experiment':
+        raise ValueError('assignment is closed, ambiguous or out of experiment time')
+    if (Path(folder) / worker / 'CLOSE_REQUESTED.json').exists():
+        raise ValueError('closure requested; no more experiments')
+    if (Path(folder) / 'STOP').exists():
+        raise ValueError('batch STOP requested; closure only')
     return state
 
 
-def reserve_claim(folder, worker):
-    require_experiment(folder, worker)
+def require_experiment(folder, worker):
+    with transaction(folder) as db:
+        return experiment_state(db, folder, worker)
+
+
+def setup_step(folder, worker, stage):
+    if stage not in ('preflight', 'capacity', 'claim', 'packet', 'pack', 'register', 'ready'):
+        raise ValueError('unknown host setup stage')
     with transaction(folder) as db:
         state = read_worker(db, worker)
+        state.update(setup_stage=stage, setup_state='ready' if stage == 'ready' else 'pending')
+        write_worker(db, worker, state)
+
+
+def request_cleanup(folder, worker, reason):
+    """Durable host failure barrier; STOP is a wake-up marker, not the authority."""
+    folder = Path(folder)
+    with transaction(folder) as db:
+        state = read_worker(db, worker)
+        failure = state.get('setup_failure') or dict(stage=state.get('setup_stage', 'launch'),
+                                                    failed_utc=stamp(), reason=reason)
+        state.update(setup_failure=failure, setup_state='failed', cleanup_required=True)
+        write_worker(db, worker, state)
+        control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+        control.setdefault('cleanup_barrier', dict(worker=worker, session_id=state['session_id'],
+                                                  claim_id=state['claim_id'], **failure))
+        db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(control),))
+    (folder/'STOP').touch()
+    save(folder/worker/'SETUP_FAILED.json', failure)
+    return dict(stopped=True, cleanup_required=True, worker=worker, failure=failure)
+
+
+def reserve_claim(folder, worker):
+    with transaction(folder) as db:
+        state = experiment_state(db, folder, worker)
         if state['claim_attempted'] or state['state'] != 'dispatched':
             raise ValueError('one claim attempt per assignment; reconcile, never retry')
         state.update(claim_attempted=True, state='claim_pending')

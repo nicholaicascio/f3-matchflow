@@ -45,6 +45,7 @@ The external workspace stores official dependencies and private runtime artifact
   Allow at most five additional minutes to preserve evidence and close. Lease margins
   can shorten both windows; queues never extend them. Do not infer timing from prose.
 - STOP, stale/missing supervisor or closure marker means freeze and close, no new probes.
+  This applies equally to `final` checks: no new compilation may start after stopping.
   A host monitor must run in the background so the parent wakes for closure requests.
 - Final official MATCH plus unchanged source/pack/flags permits promotion and submission.
   Alternate-flags proof uses source-bearing checkpoint plus flag-proof. Otherwise give
@@ -52,6 +53,7 @@ The external workspace stores official dependencies and private runtime artifact
 - Do not retry ambiguous mutations. Save durable responses, reconcile read-only, and
   escalate cleanup_required. HTTP 429/503 stops new starts, preserves Retry-After, no loops.
 - After closure save required closing notes and generate the canonical report. Parent
+  checks the acknowledged closing-notes receipt independently of give-up/submit prose and
   reconciles fresh official status and actual receipts, including after crashes/quota
   failures. Never release unrelated claims. Missing leases alone are not acknowledgements.
 - Local MATCH, submitted, server verified and integrated are different states. Only

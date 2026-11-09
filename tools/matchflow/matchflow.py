@@ -250,11 +250,10 @@ def check(db, args):
         state = lifecycle.snapshot(assigned.parent.parent, assigned.parent.name)
         if state['claim_id'] != args.claim or state['state'] != 'claimed':
             raise ValueError('lifecycle does not own an active claim')
-        if args.stage == 'final':
-            if lifecycle.phase(state) == 'reconcile':
-                raise ValueError('closure deadline passed; reconcile without compiling')
-        else:
-            lifecycle.require_experiment(assigned.parent.parent, assigned.parent.name)
+        # A stage is an evidence label, not authority to bypass stopping controls.
+        # Closure permits saving/promoting already checked inputs and releasing the
+        # lease, never another compilation of worker-selected source or flags.
+        lifecycle.require_experiment(assigned.parent.parent, assigned.parent.name)
     if args.stage != "baseline" and row["gate"] != "continue":
         raise ValueError("record a baseline and a continue gate before further checks")
     pack_path = Path(row["pack_path"])
@@ -271,7 +270,10 @@ def check(db, args):
         cmd += ["--flags", ",".join(requested)]
     for key in ("change", "observed", "why", "expect", "regions"):
         if getattr(args, key, None):
-            cmd += ["--" + key, getattr(args, key)]
+            value = getattr(args, key)
+            if not isinstance(value, str):
+                raise ValueError('checker note fields must be strings')
+            cmd += ["--" + key + '=' + value]
     cmd += [wsl_path(source)]
     imported = getattr(args, 'import_evidence', None)
     if imported:
@@ -284,6 +286,10 @@ def check(db, args):
             raise ValueError('imported evidence needs a measured nonnegative seconds field')
         run = subprocess.CompletedProcess(cmd, raw_import['exit_code'], raw_import['stdout'], raw_import['stderr'])
     else:
+        if row.get('assignment_path'):
+            # Hashing/loading inputs must not turn an earlier guard into permission
+            # to start a compile after STOP or supervisor loss arrives meanwhile.
+            lifecycle.require_experiment(assigned.parent.parent, assigned.parent.name)
         start = time.monotonic()
         try:
             run = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)

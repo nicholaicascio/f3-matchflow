@@ -287,6 +287,8 @@ class Controls(unittest.TestCase):
                 return dict(submission_id='sub_fixture')
             return self.api(tool, body)
         service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        service.closing_notes(self.root, self.worker, 'Literal wrapper retained exact codegen.',
+                              api=lambda tool, body: dict(checkpoint_id='chk_notes_fixture'))
         generated = evidence.report(self.root, self.worker, db_path)
         self.assertEqual(generated['final']['status'], 'match')
         state = life.snapshot(self.root, self.worker)
@@ -316,6 +318,8 @@ class Controls(unittest.TestCase):
         service.close(self.root, self.worker, 'flag-proof', notes=dict(note='exact diagnostic proof fixture'),
                       db_path=db_path, api=api)
         self.assertEqual(calls, ['status', 'checkpoint', 'flag'])
+        service.closing_notes(self.root, self.worker, 'Exact alternate flags proved the listed discrepancy.',
+                              api=lambda tool, body: dict(checkpoint_id='chk_notes_fixture'))
         generated = evidence.report(self.root, self.worker, db_path)
         self.assertEqual(generated['outcome'], 'flag_review')
         audited = evidence.audit_worker(self.root, self.task, life.snapshot(self.root, self.worker),

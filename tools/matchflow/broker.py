@@ -117,27 +117,54 @@ def binding(session):
 def start(session, api=service.request, acquire=None):
     """Host-only just-in-time claim. Never callable by the matching worker tool."""
     row, assignment, state = binding(session)
-    from preflight import require
-    require()
     folder, worker = Path(row['folder']), row['worker']
-    batch.capacity(dict(checked_at=life.stamp(), status=api('status', {})), 1)
-    result = service.claim(folder, worker, api=api)
-    if result.get('outcome') == 'blocked':
-        evidence.report(folder, worker, db_path=ledger.DEFAULT_DB)
-        return result
-    cid = result['claim_id']
-    packet = api('packet', dict(claim_id=cid, context_mode='resume'))
-    life.save(folder/worker/'packet.json', packet)
-    from packs import acquire as download_pack
-    pack = (acquire or download_pack)(workspace_root(), cid, packet)
-    state = life.snapshot(folder, worker)
-    model, _, variant = state['model'].partition('#')
-    args = argparse.Namespace(claim=cid, address=state['address'], lane=assignment['target']['lane'],
-                              model=model, variant=variant or 'default', harness='OpenCode', pack=str(pack),
-                              deadline=state['deadline_utc'], assignment=str(folder/worker/'assignment.json'))
-    with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
-        ledger.register(db, args)
-    return dict(ready=True, claim_id=cid, address=state['address'])
+    try:
+        from preflight import require
+        life.setup_step(folder, worker, 'preflight')
+        require()
+        life.require_experiment(folder, worker)
+        life.setup_step(folder, worker, 'capacity')
+        batch.capacity(dict(checked_at=life.stamp(), status=api('status', {})), 1)
+        life.setup_step(folder, worker, 'claim')
+        result = service.claim(folder, worker, api=api)
+        if result.get('outcome') == 'blocked':
+            evidence.report(folder, worker, db_path=ledger.DEFAULT_DB)
+            return result
+        cid = result['claim_id']
+        life.setup_step(folder, worker, 'packet')
+        packet = api('packet', dict(claim_id=cid, context_mode='resume'))
+        life.save(folder/worker/'packet.json', packet)
+        life.setup_step(folder, worker, 'pack')
+        from packs import acquire as download_pack
+        pack = (acquire or download_pack)(workspace_root(), cid, packet)
+        life.setup_step(folder, worker, 'register')
+        state = life.snapshot(folder, worker)
+        model, _, variant = state['model'].partition('#')
+        args = argparse.Namespace(claim=cid, address=state['address'], lane=assignment['target']['lane'],
+                                  model=model, variant=variant or 'default', harness='OpenCode', pack=str(pack),
+                                  deadline=state['deadline_utc'], assignment=str(folder/worker/'assignment.json'))
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            ledger.register(db, args)
+        life.setup_step(folder, worker, 'ready')
+        return dict(ready=True, claim_id=cid, address=state['address'])
+    except BaseException:
+        life.request_cleanup(folder, worker, 'host_setup_failed')
+        raise
+
+
+def failure(name, worker, session, parent, reason='launch_failed'):
+    """Host-only fallback, also works when a bind/start process was interrupted."""
+    session_id(session); session_id(parent)
+    if reason not in ('launch_failed', 'prompt_failed') or not re.fullmatch(r'worker[0-9]{2,3}', worker):
+        raise ValueError('invalid host failure context')
+    with closing(registry()) as db:
+        if db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone():
+            raise ValueError('workers cannot request host launch failure operations')
+    folder = private_root(batch.batch_path(name))
+    manifest = life.load(folder/'batch.json')
+    if not any(t['id'] == worker for t in manifest['tasks']):
+        raise ValueError('unknown prepared worker')
+    return life.request_cleanup(folder, worker, reason)
 
 
 def completion(session, metadata=None):
@@ -191,8 +218,13 @@ def worker_call(session, op, data, api=service.request):
         return dict(target=assignment['target'], ownership=state, phase=life.phase(state),
                     close_requested=(folder/worker/'CLOSE_REQUESTED.json').exists() or (folder/'STOP').exists())
     if op == 'completion':
+        try:
+            notes_complete = state['state'] == 'closed' and service.closing_notes_record(folder, worker, state)['status'] in ('acknowledged', 'not_applicable')
+        except ValueError:
+            notes_complete = False
         return dict(worker=worker, address=state['address'], session_id=session, claim_id=cid,
-                    state=state['state'], outcome=state.get('outcome'), cleanup_required=state['state'] != 'closed',
+                    state=state['state'], outcome=state.get('outcome'),
+                    cleanup_required=state['state'] != 'closed' or not notes_complete, closing_notes_complete=notes_complete,
                     report_path=str(folder/worker/'report.json'))
     if op == 'read':
         if data.get('area') == 'packet':
@@ -312,10 +344,9 @@ def worker_call(session, op, data, api=service.request):
         phase = data.get('phase')
         if phase not in ('plan', 'draft_review', 'notes') or not isinstance(data.get('note'), str) or not data['note'].strip():
             raise ValueError('checkpoint requires plan/draft_review/notes and a substantive note')
-        if phase != 'notes':
-            life.require_experiment(folder, worker)
-        elif state['state'] not in ('claimed', 'closed'):
-            raise ValueError('resolve ambiguous claim state before closing notes')
+        if phase == 'notes':
+            return service.closing_notes(folder, worker, data['note'], api=api)
+        life.require_experiment(folder, worker)
         digest = hashlib.sha256((phase+'\0'+data['note']).encode('utf-8')).hexdigest()
         body = dict(claim_id=cid, phase=phase, note=data['note'], request_id='mf-'+digest[:40])
         path = folder/worker/(body['request_id']+'.json')
@@ -346,7 +377,7 @@ def worker_call(session, op, data, api=service.request):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['task', 'bind', 'start', 'worker', 'completion'])
+    parser.add_argument('command', choices=['task', 'bind', 'start', 'worker', 'completion', 'failure'])
     args = parser.parse_args()
     value = json.loads(sys.stdin.read(MAX_TEXT + 4096))
     try:
@@ -358,6 +389,8 @@ def main():
             result = start(value['session'])
         elif args.command == 'completion':
             result = completion(value['session'], value.get('metadata'))
+        elif args.command == 'failure':
+            result = failure(value['batch'], value['worker'], value['session'], value['parent'], value.get('reason', 'launch_failed'))
         else:
             result = worker_call(value['session'], value['op'], value.get('data', {}))
         print(json.dumps(result))

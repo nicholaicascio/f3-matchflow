@@ -19,4 +19,4 @@ def command(arguments, mode='check'):
     return ['wsl', '-d', config['distro'], '-u', config['user'], '--', 'bash',
             wsl_path(REPOSITORY / 'tools/matchflow/check.sh'),
             '--runtime-json', json.dumps(config, separators=(',', ':')),
-            '--key-file', wsl_path(key_file()), '--mode', mode, *arguments]
+            '--key-file', wsl_path(key_file()), '--mode', mode, '--', *arguments]

@@ -7,12 +7,21 @@ import runpy
 import sys
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def parse_invocation(argv):
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--runtime-json', required=True)
     parser.add_argument('--key-file', required=True)
     parser.add_argument('--mode', choices=['check', 'preflight'], default='check')
-    args, remaining = parser.parse_known_args()
+    if '--' not in argv:
+        parser.error('trusted runner options require an explicit -- boundary')
+    boundary = argv.index('--')
+    # Never parse a checker argument or a note value as a privileged runner option.
+    args = parser.parse_args(argv[:boundary])
+    return args, argv[boundary+1:]
+
+
+def main():
+    args, remaining = parse_invocation(sys.argv[1:])
     config = json.loads(args.runtime_json)
     checker = Path(config['checker'])
     required = [checker, checker.with_name('msvc9.py'),

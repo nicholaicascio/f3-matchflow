@@ -99,6 +99,80 @@ def acknowledgement(response, operation, has_source=False):
                 verification='not_submitted')
 
 
+def closing_notes_record(folder, worker, state=None):
+    """Validate an actual own-claim notes receipt, independently of report prose."""
+    folder = Path(folder)
+    state = life.snapshot(folder, worker) if state is None else state
+    if state.get('outcome') == 'blocked' and not state.get('claim_id') and not state.get('claim_attempted'):
+        return dict(required=False, status='not_applicable', checkpoint_id=None,
+                    receipt_path=None, receipt_sha256=None)
+    path = folder/worker/'closing-notes.json'
+    try:
+        value = life.load(path)
+        if not isinstance(value, dict):
+            raise ValueError('notes receipt is not an object')
+        body, response = value['request'], value['response']
+        if not isinstance(body, dict) or not isinstance(response, dict):
+            raise ValueError('notes request/response is not an object')
+        if (state['state'] != 'closed' or not state.get('claim_id') or value.get('schema_version') != 1 or
+                value.get('state') != 'acknowledged' or value.get('address') != state['address'] or
+                value.get('session_id') != state['session_id'] or body.get('claim_id') != state['claim_id'] or
+                body.get('phase') != 'notes' or not isinstance(body.get('note'), str) or not body['note'].strip() or
+                not isinstance(response.get('checkpoint_id'), str) or not response['checkpoint_id']):
+            raise ValueError('receipt does not acknowledge notes for this closed claim/session')
+        closed = life.timestamp(state['closed_utc'])
+        requested = life.timestamp(value['requested_utc'])
+        observed = life.timestamp(value['observed_utc'])
+        if not closed <= requested <= closed + life.timedelta(minutes=30) or not requested <= observed <= life.utc():
+            # A valid server acknowledgement may arrive after the request window
+            # ends. Do not discard it solely because the response was delayed.
+            raise ValueError('notes request/acknowledgement timestamps are inconsistent')
+        expected_id = 'closing-notes-' + hashlib.sha256((state['claim_id']+'\0'+body['note']).encode()).hexdigest()[:40]
+        if body.get('request_id') != expected_id or state.get('closing_notes_request_id') != expected_id:
+            raise ValueError('notes receipt request identity differs')
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise ValueError('closing notes missing or invalid: '+str(exc)) from None
+    return dict(required=True, status='acknowledged', checkpoint_id=response['checkpoint_id'],
+                receipt_path=str(path), receipt_sha256=ledger.digest(path))
+
+
+def closing_notes(folder, worker, note, api=request):
+    folder = Path(folder)
+    state = life.snapshot(folder, worker)
+    if state['state'] != 'closed' or not state.get('claim_id'):
+        raise ValueError('closing notes require acknowledged own-claim closure first')
+    if not isinstance(note, str) or not note.strip() or len(note.encode('utf-8')) > 32768:
+        raise ValueError('closing notes need substantive bounded text')
+    path = folder/worker/'closing-notes.json'
+    if path.exists():
+        previous = life.load(path)
+        if previous.get('state') == 'acknowledged' and previous.get('request', {}).get('note') == note:
+            return dict(saved=True, **closing_notes_record(folder, worker, state))
+        raise ValueError('closing notes already reserved; reconcile, never retry or overwrite')
+    if life.utc() > life.timestamp(state['closed_utc']) + life.timedelta(minutes=30):
+        raise ValueError('closing notes window expired; do not fabricate a receipt')
+    request_id = 'closing-notes-' + hashlib.sha256((state['claim_id']+'\0'+note).encode()).hexdigest()[:40]
+    body = dict(claim_id=state['claim_id'], phase='notes', note=note, request_id=request_id)
+    with life.transaction(folder) as db:
+        current = life.read_worker(db, worker)
+        if current.get('closing_notes_request_id') or current['state'] != 'closed':
+            raise ValueError('closing notes already reserved; reconcile, never retry or overwrite')
+        current['closing_notes_request_id'] = request_id
+        life.write_worker(db, worker, current)
+        state = current
+    value = dict(schema_version=1, address=state['address'], session_id=state['session_id'],
+                 request=body, requested_utc=life.stamp(), state='pending')
+    # Reserve before mutation; ambiguous transport stays pending without replay.
+    life.save(path, value)
+    response = api('checkpoint', body)
+    acknowledged = isinstance(response.get('checkpoint_id'), str) and bool(response['checkpoint_id'])
+    value.update(response=response, observed_utc=life.stamp(), state='acknowledged' if acknowledged else 'unresolved')
+    life.save(path, value)
+    if not acknowledged:
+        raise ValueError('closing notes not acknowledged; preserve response and reconcile')
+    return dict(saved=True, **closing_notes_record(folder, worker, state))
+
+
 def submit_artifact(db, cid, proof=False):
     row = ledger.attempt(db, cid)
     ledger.ensure_active(row)
@@ -218,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--db', default=str(ledger.DEFAULT_DB))
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('claim', 'giveup', 'submit', 'reconcile', 'flag-proof'):
+    for name in ('claim', 'giveup', 'submit', 'reconcile', 'flag-proof', 'notes'):
         p = sub.add_parser(name); p.add_argument('folder'); p.add_argument('worker')
         if name == 'giveup':
             p.add_argument('--source'); p.add_argument('--notes', required=True)
@@ -227,9 +301,12 @@ def main():
             p.add_argument('--claim-id')
         if name == 'flag-proof':
             p.add_argument('--notes', required=True)
+        if name == 'notes':
+            p.add_argument('--notes', required=True, help='JSON with substantive note text')
     args = parser.parse_args()
     try:
-        result = (reconcile(args.folder, args.worker, args.claim_id) if args.command == 'reconcile' else
+        result = (closing_notes(args.folder, args.worker, life.load(args.notes)['note']) if args.command == 'notes' else
+                  reconcile(args.folder, args.worker, args.claim_id) if args.command == 'reconcile' else
                   claim(args.folder, args.worker) if args.command == 'claim' else
                   close(args.folder, args.worker, args.command, source=getattr(args, 'source', None),
                         notes=life.load(args.notes) if hasattr(args, 'notes') else None,

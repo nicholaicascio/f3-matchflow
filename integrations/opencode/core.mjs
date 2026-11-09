@@ -68,14 +68,26 @@ export async function launch(ctx, host, input, context) {
     await host('bind', { ...input, session: child.id, parent: parent.id }, context.signal);
     ready = await host('start', { session: child.id }, context.signal);
   } catch (error) {
+    let barrierPersisted = false;
+    try {
+      await host('failure', {...input, session:child.id, parent:parent.id, reason:'launch_failed'});
+      barrierPersisted = true;
+    } catch { /* return an explicit unresolved barrier, never retry setup */ }
     return { sessionID: child.id, batch: input.batch, worker: input.worker,
+      barrier_persisted: barrierPersisted,
       cleanup_required: true, error: `Host setup/claim failed: ${String(error.message).slice(0,512)}. Inspect exact lifecycle/receipts; never retry launch.` };
   }
   if (!ready.ready) return { sessionID: child.id, ...ready };
   try {
     await ctx.session.prompt({ sessionID: child.id, text: task.prompt });
   } catch {
+    let barrierPersisted = false;
+    try {
+      await host('failure', {...input, session:child.id, parent:parent.id, reason:'prompt_failed'});
+      barrierPersisted = true;
+    } catch { /* parent must reconcile a failed host barrier as well */ }
     return { sessionID: child.id, ...ready, cleanup_required: true,
+      barrier_persisted: barrierPersisted,
       error: 'Prompt admission failed after claim; reconcile this exact claim, do not relaunch.' };
   }
   // Wait is local/event-driven, not worker/service polling. It does not reset leases.

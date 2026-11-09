@@ -49,6 +49,8 @@ Do not run preflight or change workspace artifacts while matching workers are ru
 Our `check.sh`, `check_runner.py` and `checker.py` stay here. They invoke the external
 official checker through configured WSL/Wine without sourcing workspace shell scripts.
 Credentials are loaded privately inside the trusted runner, never passed in argv.
+An enforced `--` boundary separates trusted runner options from checker arguments.
+Notes are forwarded as literal `--name=value` data, never runner configuration.
 
 ## Screen and prepare (orchestrator only)
 
@@ -102,6 +104,8 @@ Operations:
   with byte `offset` and instruction-count `limit` pagination. No worker-supplied
   address/extent, raw bytes, shell or service upload. Never paste output into notes.
 - `checkpoint`: `phase=plan|draft_review|notes`, substantive `note`; forced own claim.
+  Closing notes are accepted only after acknowledged closure and must have their own
+  acknowledged checkpoint receipt; a plan/proof checkpoint or give-up prose is not enough.
 - `check`: `source`, `stage=baseline|attempt|final`, `change/why/expect`, `observed`
   from check two, and required `regions`. Optional complete comma-separated codegen
   `flags` is allowlisted; include/output/path/compiler-injection options are refused.
@@ -111,7 +115,8 @@ Operations:
 - `close`: `operation=submit|giveup|flag-proof`. Giveup uses `source` plus `notes` containing
   reason/category/tried/still_differs/suspected_cause, or explicit `no_source_reason`.
   Flag-proof needs `notes.note`. Submit uses only the host's promoted artifact.
-- `report`: generates canonical v2 evidence report for the v3 assignment after closure.
+- `report`: generates a canonical v3 evidence report after closure and acknowledged
+  closing notes. Unclaimed blocked assignments do not require closing notes.
 
 The worker does not get a shell to run private scripts or permuter loops. Ask the parent
 for a reviewed additional capability rather than broadening permissions. Scalar timing
@@ -130,6 +135,10 @@ python tools/matchflow/matchflow.py summary
 
 The local watchdog enforces conservative dispatch-based deadlines, 20-minute wall,
 30-minute stagnation and 40+5 minute total limits, shortened by actual service lease.
+All checks, including those labelled `final`, must pass the experiment guards again
+immediately before starting compilation. There is no closure-time compile
+exception: the five-minute closure period is for preserving already checked evidence,
+promotion/submission of an unchanged final MATCH, giving up and closing notes.
 Supervisor loss/STOP means closure only. The parent must respond to monitor completion,
 inspect exact sessions and reconcile only its owned claims. Completion notices are
 event-driven. OpenCode/plugin restarts never automatically replay work or reset leases.
@@ -139,6 +148,9 @@ reservations. Never relaunch to repair them. HTTP 401, 403 edge rejection/access
 429 and 503 are distinguished without printing keys or response bodies. 429/503 writes
 STOP/cooldown evidence; failures without acknowledged closure stop new starts and wake
 the parent. No browser impersonation, global retry loop or official checker patching.
+Host setup or prompt-admission failure persists a batch-wide cleanup barrier before
+returning. The barrier is latched in lifecycle storage; deleting STOP does not clear it.
+Reconcile that batch and prepare a fresh reviewed batch, never automatically resume it.
 
 If a worker crashes or setup fails after a claim, the parent uses existing host-only
 `service.py giveup --source ... --notes ...` (or explicit no-source reason), submit or
@@ -146,11 +158,26 @@ flag-proof as appropriate, then reconciles. A lost claim response needs the exac
 ID confirmed by official status. Missing receipt is unresolved, not invented success.
 Closing notes remain required. No automatic bulk cleanup, unrelated release or claim retry.
 
+For host recovery after an early setup failure:
+```text
+python tools/matchflow/service.py notes PRIVATE_BATCH_FOLDER worker01 --notes PRIVATE_CLOSING_NOTES.json
+python tools/matchflow/evidence.py report PRIVATE_BATCH_FOLDER worker01
+```
+The notes JSON has `{"note":"Substantive closing notes describing the setup failure"}`.
+This follows an acknowledged give-up, not instead of one. Pending/ambiguous notes are
+never replayed or inferred successful. A pre-registration failure may produce a
+receipt-only report only when saved official ownership, host failure evidence,
+explicit no-source give-up acknowledgement and closing-notes receipt agree. Its pack,
+source and checker fields remain null; no ledger attempt or check is invented.
+
 Audit validates canonical raw checker evidence/hashes, ownership, session identity,
 receipt contents, source handoff and actual verdict separately. Absence from open claims
 does not prove submission/retention. Non-clean audits exit 2. v1/v2 history stays preserved,
 never silently upgraded. Host-only ledger/reclassify/import/usage CLI utilities remain
 available for operator investigation; they are not worker capabilities.
+Report v3 independently validates closing-notes claim/session/phase, post-closure
+timestamps, checkpoint acknowledgement and receipt hash. Historical reports/receipts
+remain untouched and are not relabelled v3 or accepted without the required proof.
 
 The launcher captures raw child-session usage at completion. Aggregate it with
 `python tools/matchflow/usage.py PRIVATE_BATCH_FOLDER --method subagents`. Missing

@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Generated one-function evidence report v2",
+  "title": "Generated one-function evidence report v3 with closing-notes receipts",
   "type": "object",
-  "required": ["schema_version", "address", "claim_id", "session_id", "lane", "model", "variant", "harness", "outcome", "worker_start_utc", "closed_utc", "candidate_path", "source_sha256", "pack_path", "pack_sha256", "checked_flags", "baseline", "final", "latest_valid", "service", "remaining", "elapsed_seconds", "provenance"],
+  "required": ["schema_version", "address", "claim_id", "session_id", "lane", "model", "variant", "harness", "outcome", "worker_start_utc", "closed_utc", "candidate_path", "source_sha256", "pack_path", "pack_sha256", "checked_flags", "baseline", "final", "latest_valid", "service", "remaining", "elapsed_seconds", "provenance", "closing_notes", "setup_failure"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "address": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
     "claim_id": {"type": ["string", "null"], "pattern": "^clm_[A-Za-z0-9]+$"},
     "session_id": {"type": ["string", "null"], "pattern": "^ses_[A-Za-z0-9]+$"},
@@ -30,7 +30,20 @@
     },
     "remaining": {"type": "array", "items": {"type": "string"}},
     "elapsed_seconds": {"type": "number", "minimum": 0}, "elapsed_estimated": {"type": "boolean"},
-    "provenance": {"const": "generated_from_lifecycle_and_ledger"}
+    "provenance": {"enum": ["generated_from_lifecycle_and_ledger", "generated_from_lifecycle_and_service_receipts"]},
+    "closing_notes": {
+      "type": "object", "required": ["required", "status", "checkpoint_id", "receipt_path", "receipt_sha256"],
+      "properties": {
+        "required": {"type": "boolean"}, "status": {"enum": ["acknowledged", "not_applicable"]},
+        "checkpoint_id": {"type": ["string", "null"]}, "receipt_path": {"type": ["string", "null"]},
+        "receipt_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "setup_failure": {
+      "type": ["object", "null"], "required": ["stage", "failed_utc", "reason"],
+      "properties": {"stage": {"enum": ["claim", "packet", "pack", "register"]},
+                     "failed_utc": {"type": "string", "format": "date-time"}, "reason": {"type": "string"}}
+    }
   },
   "$defs": {
     "check": {

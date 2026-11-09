@@ -15,10 +15,12 @@ check requires change/why/expect, observed from check two, and regions when requ
 Inspect check output, not only prose metrics. Fix the first mismatch with one hypothesis
 at a time. Mark a register-only wall with evidence. status reports measured deadlines.
 On closure/STOP, freeze best source and close. promote requires an unchanged final MATCH.
+The final check must run before stopping; the final label never bypasses STOP/deadlines.
 close(submit) only uses the promoted normal-flags artifact; close(flag-proof) requires an
 exact diagnostic MATCH; otherwise close(giveup) with best source and structured notes.
 Never retry ambiguous mutations. Report cleanup_required immediately on failure.
 If unfit history is discovered, ask the parent to reclassify before further work.
-After acknowledged closure, save checkpoint(notes), then report. Final answer is one
+After acknowledged closure, save checkpoint(notes) and obtain its receipt, then report.
+Give-up prose or a pre-closure checkpoint does not count as closing notes. Final answer is one
 RESULT line: address, outcome, report path, claim ID, cleanup_required. Never claim server
 verification from a local MATCH, submission receipt, process exit or missing open lease.
