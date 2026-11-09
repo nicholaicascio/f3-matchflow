@@ -47,8 +47,10 @@ python tools/matchflow/batch.py prepare BATCH --selection PRIVATE_SELECTION_JSON
 
 Uppercase arguments are placeholders, not literal paths. Relative helper outputs go
 under `WORKSPACE/work/matchflow/`; **inputs need their explicit paths**. Choose fresh
-batch/output names, never overwrite historical evidence. `prepare --model
-provider/model#variant` explicitly overrides the default worker model.
+batch/output names, never overwrite historical evidence. `prepare` uses your persistent
+`worker_model` from `matchflow.local.json`; `--model "provider/model#variant"` overrides it
+for this batch. With neither set, the legacy OpenCode Go/DeepSeek default remains. Choose
+a provider you have configured; see [model setup](setup.md#choosing-a-worker-model).
 
 ## 2. Validate, dispatch and launch
 
@@ -73,7 +75,10 @@ For each exact prepared worker call the orchestrator tool, for example:
 ```
 
 That is input to **`matchflow_launch`**, not a shell command or the general subagent
-tool. It performs the real claim just before work, binds identity, obtains the exact
+tool. It first validates the exact prepared model/variant against OpenCode's active catalog
+for this checkout. An unavailable or non-chat/tool-capable model fails before child creation
+or claiming, with configuration guidance and no fallback. It performs the real claim just
+before work, binds identity, obtains the exact
 pack and starts the restricted child. Prepare/dispatch do not claim. No replacements,
 refills, co-work or automatic reclaims. Never dispatch matching through general agents,
 headless CLI, Workflows or manually constructed child sessions.

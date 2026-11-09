@@ -16,6 +16,7 @@ Configure ignored `matchflow.local.json` (or `F3_MATCHFLOW_WORKSPACE` for worksp
 ```json
 {
   "workspace": "F:/Games/f3decomp",
+  "worker_model": "YOUR_PROVIDER/YOUR_CHAT_MODEL",
   "toolchain": {
     "distro": "Ubuntu", "user": "root",
     "checker": "/root/.f3kit/f3check/f3check.py",
@@ -31,6 +32,8 @@ Configure ignored `matchflow.local.json` (or `F3_MATCHFLOW_WORKSPACE` for worksp
 Defaults above are conveniences, not automatic provisioning. The credential file defaults
 to `%LOCALAPPDATA%/f3decomp/api-key`; optional `key_file` changes it. Keys must stay outside
 the repository. Never put a key's value into configuration, arguments, logs or prompts.
+Replace the `worker_model` placeholder with your actual OpenCode model selection, optionally
+including `#variant`. See [model setup](../../docs/setup.md#choosing-a-worker-model).
 
 ```text
 npm ci --ignore-scripts --prefix integrations/opencode
@@ -140,7 +143,10 @@ python tools/matchflow/batch.py dispatch BATCH --method subagents --status PRIVA
 python tools/matchflow/batch.py monitor BATCH
 ```
 
-`prepare --model provider/model#variant` sets the explicit worker model. It generates
+`prepare --model provider/model#variant` overrides local `worker_model` for one batch.
+Without the option, it reads that ignored local setting, then falls back to built-in
+`opencode-go/deepseek-v4.1-flash#max` only if the setting is absent. Invalid settings fail;
+variants are optional. The resolved choice is frozen into the assignment. It generates
 immutable v3 assignments and prompt snapshots from the repository template. No claims
 are taken by prepare/dispatch. The parent runs monitor in the background with completion
 notification, then calls `matchflow_launch({batch:"BATCH",worker:"worker01"})` per worker.
@@ -148,6 +154,14 @@ This tool makes a real fixed-address claim and starts a linked child session, so
 only for requested matching work, never code tests. It binds identity before the prompt,
 rechecks service capacity/availability, downloads the exact pack safely and registers it.
 No replacement/refill, auto-resume or mutation retries. Legacy batches cannot launch.
+
+Before child creation/binding or claiming, the plugin verifies the exact prepared
+provider/model is enabled, chat/tool-capable and offers the optional variant in OpenCode's
+active catalog for the checkout. Missing models and catalog-read failures stop with setup
+guidance, never fallback. Python `preflight.py --online` checks service/toolchain only,
+not model availability. The catalog check makes no paid generation request and cannot
+guarantee provider credit/network/credentials; later failures follow normal cleanup rules.
+Changing the local setting affects new batches only, never immutable prepared assignments.
 
 ## Restricted worker contract
 

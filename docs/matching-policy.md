@@ -19,8 +19,12 @@ The external workspace stores official dependencies and private runtime artifact
 - A saved draft is never a selection preference by itself. It is starting material after
   the function is chosen on reviewed history, report scope and a concrete lead. The same
   applies to a near-miss count: it is not a readiness score.
-- Default worker model remains opencode-go/deepseek-v4.1-flash#max; honor explicit human
-  overrides. Record actual model, variant, harness and usage, never guessed billing.
+- Resolve worker model at preparation: explicit `--model`, then local `worker_model`,
+  then built-in opencode-go/deepseek-v4.1-flash#max. Honor explicit human overrides.
+  Before child creation/claim, require that exact enabled tool-capable chat model and
+  optional variant in OpenCode's active catalog. Missing/catalog failure is a setup
+  error, never permission to fall back. Record actual model, variant, harness and usage,
+  never guessed billing. Local setting changes never change prepared assignments.
 - Prepare fresh v3 assignments with review facts and fresh successful online preflight. Dispatch subagents,
   then use matchflow_launch for each exact prepared worker. Its trusted host claims just
   before work, validates ownership, obtains the exact pack and registers evidence.

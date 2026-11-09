@@ -1,9 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelRef, launch, workerPermissions, invoke } from './core.mjs';
+import { modelRef, launch, workerPermissions, invoke, requireWorkerModel } from './core.mjs';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+const availableModel = (providerID='p', id='m') => ({providerID, id, enabled:true,
+  type:'chat', capabilities:{tools:true}, variants:[{id:'max'}]});
+const availableContext = ctx => ({...ctx, location:{directory:'/fixture/checkout'},
+  model:{list:async()=>({data:[availableModel(),availableModel('provider','model')]})}});
 
 test('model binding is explicit and deny-by-default covers every other tool', () => {
   assert.deepEqual(modelRef('provider/model#max'), {providerID:'provider', id:'model', variant:'max'});
@@ -27,7 +32,7 @@ test('real child is bound and claimed before first prompt; no model-selected ide
     if(command==='start') return {ready:true,claim_id:'clm_test'};
     return {};
   };
-  const result = await launch(ctx, host, {batch:'test',worker:'worker01'}, {sessionID:'ses_parent'});
+  const result = await launch(availableContext(ctx), host, {batch:'test',worker:'worker01'}, {sessionID:'ses_parent'});
   assert.equal(result.sessionID, 'ses_real');
   assert.deepEqual(calls.slice(0,5).map(c=>c[0]), ['task','create','bind','start','prompt']);
   assert.equal(calls.find(c=>c[0]==='bind')[1].session, 'ses_real');
@@ -54,7 +59,7 @@ test('ambiguous host failure returns exact session and never retries', async () 
     }
     return {};
   };
-  const result=await launch(ctx,host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
+  const result=await launch(availableContext(ctx),host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
   assert.equal(result.sessionID,'ses_child');
   assert.equal(result.cleanup_required,true);
   assert.equal(starts,1);
@@ -77,7 +82,7 @@ test('failed prompt admission persists cleanup barrier before returning',async()
     }
     return {};
   };
-  const result=await launch(ctx,host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
+  const result=await launch(availableContext(ctx),host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
   assert.equal(result.cleanup_required,true);
   assert.equal(result.barrier_persisted,true);
   assert.equal(calls.at(-1),'failure');
@@ -93,7 +98,7 @@ test('lost cleanup barrier is explicitly unresolved and never triggers setup ret
     if(command==='failure') throw new Error('offline barrier storage failure');
     return {};
   };
-  const result=await launch(ctx,host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
+  const result=await launch(availableContext(ctx),host,{batch:'test',worker:'worker01'},{sessionID:'ses_parent'});
   assert.equal(result.cleanup_required,true);
   assert.equal(result.barrier_persisted,false);
   assert.equal(starts,1);
@@ -123,4 +128,40 @@ test('host protocol rejects non-object JSON and preserves safe structured errors
   } finally {
     rmSync(folder, {recursive:true, force:true});
   }
+});
+
+test('unavailable provider/model/variant stops before child creation, binding or claim', async()=>{
+  for(const data of [[], [availableModel('other','m')], [availableModel('p','other')],
+    [{...availableModel(),enabled:false}], [{...availableModel(),type:'image'}],
+    [{...availableModel(),type:'decision'}], [{...availableModel(),capabilities:{tools:false}}],
+    [{...availableModel(),variants:[]}], [{...availableModel(),variants:[{id:'high'}]}]]) {
+    const calls=[];
+    const ctx={location:{directory:'/fixture/checkout'},model:{list:async input=>{
+      assert.deepEqual(input,{location:{directory:'/fixture/checkout'},types:['chat']});
+      calls.push('catalog');return {data};
+    }},session:{get:async()=>({id:'ses_parent'}),create:async()=>assert.fail('no child allowed')}};
+    const host=async command=>{calls.push(command);assert.equal(command,'task');return {model:'p/m#max'};};
+    await assert.rejects(launch(ctx,host,{}, {sessionID:'ses_parent'}),/No claim taken; no automatic fallback/);
+    assert.deepEqual(calls,['task','catalog']);
+  }
+});
+
+test('model inventory failure is fail-closed without leaking provider errors',async()=>{
+  for (const list of [async()=>{throw new Error('PRIVATE')}, async()=>({}), async()=>[]]) {
+    await assert.rejects(requireWorkerModel({location:{directory:'/fixture'},model:{list}},'p/m'),error=>{
+      assert.match(error.message,/Configure that provider/);
+      assert.doesNotMatch(error.message,/PRIVATE/);
+      return true;
+    });
+  }
+});
+
+test('model check allows exact variants and models without a variant; never changes selection',async()=>{
+  const ctx=availableContext({});
+  assert.deepEqual(await requireWorkerModel(ctx,'p/m'),{providerID:'p',id:'m'});
+  assert.deepEqual(await requireWorkerModel(ctx,'p/m#max'),{providerID:'p',id:'m',variant:'max'});
+  for(const value of ['p/m#', 'p/m#max#high', '#p/m', 'p/m#max/other', '', null]) {
+    assert.throws(()=>modelRef(value),/Explicit provider\/model/);
+  }
+  assert.deepEqual(modelRef('router/vendor/model'),{providerID:'router',id:'vendor/model'});
 });

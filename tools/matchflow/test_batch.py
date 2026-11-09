@@ -26,6 +26,27 @@ class BatchTests(unittest.TestCase):
     def test_default_model(self):
         self.assertEqual(batch.DEFAULT_MODEL, 'opencode-go/deepseek-v4.1-flash#max')
 
+    def test_prepare_freezes_local_model_and_cli_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            selection = root/'selection.json'; batch.save(selection, self.selection())
+            with patch.object(batch, 'ROOT', root), patch.object(batch, 'BATCHES', root/'batches'), \
+                    patch('config.settings', return_value=dict(worker_model='custom/chat#high')):
+                local = batch.prepare('local', selection)
+                explicit = batch.prepare('explicit', selection, 'other/model')
+            for prepared, model, effort in ((local, 'custom/chat#high', 'high'), (explicit, 'other/model', None)):
+                folder = Path(prepared['batch'])
+                manifest = batch.load(folder/'batch.json')
+                assignment = batch.load(folder/'worker01/assignment.json')
+                self.assertEqual(manifest['model'], model)
+                self.assertEqual(manifest['tasks'][0]['model'], model)
+                self.assertEqual(assignment['model'], model)
+                self.assertEqual(assignment['claim_body']['model'], model.split('#')[0])
+                self.assertEqual(assignment['claim_body'].get('effort'), effort)
+            with patch('config.settings', return_value=dict(worker_model='invalid')):
+                with self.assertRaisesRegex(ValueError, 'worker_model'):
+                    batch.prepare('invalid', selection)
+
     def test_valid_selection(self):
         targets = batch.validate_selection(self.selection())
         self.assertEqual(len(targets), 1)

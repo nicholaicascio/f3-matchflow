@@ -4,10 +4,25 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from config import workspace_root
+from config import workspace_root, worker_model, DEFAULT_WORKER_MODEL
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_worker_model_precedence_and_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.assertEqual(worker_model(repository=repo), DEFAULT_WORKER_MODEL)
+            path = repo/'matchflow.local.json'
+            path.write_text(json.dumps(dict(worker_model='custom/chat#high')))
+            self.assertEqual(worker_model(repository=repo), 'custom/chat#high')
+            self.assertEqual(worker_model('another/model', repository=repo), 'another/model')
+            self.assertEqual(worker_model('router/vendor/model', repository=repo), 'router/vendor/model')
+            for value in (None, '', 'model', 'p/m#', 'p/m#high#max', 'p/m#bad/variant', False, 42):
+                path.write_text(json.dumps(dict(worker_model=value)))
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'worker_model'):
+                    worker_model(repository=repo)
+                self.assertEqual(worker_model('explicit/model', repository=repo), 'explicit/model')
+
     def test_explicit_workspace_and_local_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

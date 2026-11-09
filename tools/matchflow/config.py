@@ -1,14 +1,24 @@
 """Explicit private workspace configuration, independent of the code checkout."""
 import json
 import os
+import re
 from pathlib import Path
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+DEFAULT_WORKER_MODEL = 'opencode-go/deepseek-v4.1-flash#max'
 
 
 def settings(repository=REPOSITORY):
     local = Path(repository) / 'matchflow.local.json'
     return json.loads(local.read_text(encoding='utf-8-sig')) if local.is_file() else {}
+
+
+def worker_model(override=None, repository=REPOSITORY):
+    """Resolve once at prepare: CLI override > local setting > built-in default."""
+    value = override if override is not None else settings(repository).get('worker_model', DEFAULT_WORKER_MODEL)
+    if not isinstance(value, str) or not re.fullmatch(r'[^/\s#]+/[^\s#]+(?:#[^/\s#]+)?', value):
+        raise ValueError('worker_model must be provider/model[#variant]; set it in matchflow.local.json or use prepare --model')
+    return value
 
 
 def key_file():

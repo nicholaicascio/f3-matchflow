@@ -12,12 +12,12 @@ import uuid
 
 import lifecycle
 import review
-from config import workspace_root
+from config import workspace_root, worker_model, DEFAULT_WORKER_MODEL
 
 ROOT = workspace_root()
 CODE = Path(__file__).resolve().parent
 BATCHES = ROOT / 'work' / 'batches'
-DEFAULT_MODEL = 'opencode-go/deepseek-v4.1-flash#max'
+DEFAULT_MODEL = DEFAULT_WORKER_MODEL
 
 
 def now():
@@ -82,9 +82,8 @@ def prompt_for(assignment):
         address=target['address'], review=review.summary(target), reason=target['reason'])
 
 
-def prepare(name, selection_path, model=DEFAULT_MODEL):
-    if not re.fullmatch(r'[^\s/]+/[^\s]+', model):
-        raise ValueError('Explicit provider/model[#variant] required')
+def prepare(name, selection_path, model=None):
+    model = worker_model(model)
     selection = load(selection_path)
     # Import only known local verdicts; absence is never evidence of clean history.
     ledger_path = ROOT / 'work' / 'matchflow' / 'ledger.sqlite3'
@@ -405,7 +404,8 @@ def recover(name, actions_path=None, apply=False, api=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    p = sub.add_parser('prepare'); p.add_argument('batch'); p.add_argument('--selection', required=True); p.add_argument('--model', default=DEFAULT_MODEL)
+    p = sub.add_parser('prepare'); p.add_argument('batch'); p.add_argument('--selection', required=True)
+    p.add_argument('--model', help='provider/model[#variant]; overrides local worker_model, then built-in default')
     p = sub.add_parser('headless'); p.add_argument('batch'); p.add_argument('--status', required=True); p.add_argument('--jobs', type=int, required=True)
     p = sub.add_parser('audit'); p.add_argument('batch'); p.add_argument('--status', required=True)
     p.add_argument('--expect', help='Reviewed JSON with batch and exact worker/address/claim_id/session_id identities')

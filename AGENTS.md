@@ -43,6 +43,11 @@ through general subagents, headless CLI or Workflows; those legacy paths are dis
 Workers have no shell or raw service access. All edits/checks go through session-scoped
 tools. Never broaden permissions or edit tooling to work around a worker refusal.
 
+Worker model resolution is `prepare --model` > local `worker_model` > built-in default.
+Do not assume another user's provider access. Launch validates the exact prepared model
+and variant before child creation/claim; fix configuration or prepare a new reviewed
+batch if unavailable, never silently substitute a model or mutate an assignment.
+
 ## Pipeline development
 
 - Read `README.md` and `tools/matchflow/README.md` before pipeline changes.

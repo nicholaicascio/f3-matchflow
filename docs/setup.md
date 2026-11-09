@@ -53,9 +53,9 @@ workspace artifacts or run setup/preflight while workers are active.
 ## 2. Install prerequisites and connect the service
 
 Install Windows Python 3.10+, Node 22+, OpenCode V2 (tested 2.2.6), WSL and Wine in your
-chosen WSL distribution. You need a model provider configured in OpenCode. Default
-workers use `opencode-go/deepseek-v4.1-flash#max`; if unavailable, explicitly select an
-available provider/model/variant when preparing assignments. Never silently fall back.
+chosen WSL distribution. You need a model provider configured in OpenCode, but do not
+need OpenCode Go or DeepSeek specifically. Set your own persistent worker model below.
+Never silently fall back to a different provider/model.
 
 Follow [the official service guide](https://f3decomp.com/agents.md) to connect your own
 contributor account, approve the terms and save the resulting key privately. Do not reuse
@@ -88,6 +88,7 @@ value with your actual paths. Use forward slashes in JSON to avoid backslash esc
 ```json
 {
   "workspace": "D:/private/f3-workspace",
+  "worker_model": "YOUR_PROVIDER/YOUR_CHAT_MODEL",
   "key_file": "C:/Users/YOU/AppData/Local/f3decomp/api-key",
   "toolchain": {
     "distro": "Ubuntu",
@@ -113,6 +114,40 @@ existing installs, not a provisioning promise. `F3_MATCHFLOW_WORKSPACE` override
 the workspace setting. The key defaults to `%LOCALAPPDATA%/f3decomp/api-key` on Windows;
 an explicit `key_file` avoids ambiguity. All configured paths must actually exist where
 required; create the empty workspace directory before bootstrap.
+
+### Choosing a worker model
+
+Replace `YOUR_PROVIDER/YOUR_CHAT_MODEL` with an exact model selection available in your
+OpenCode installation. Use OpenCode's model picker to find the provider, model and
+supported variants; configure/authenticate the provider first. Workers require a
+**tool-capable chat model**, not an image or decision model. Model-provider credentials
+are managed by OpenCode, separately from the f3decomp API-key file.
+
+Selection precedence, evaluated when preparing a batch:
+
+1. `batch.py prepare ... --model "provider/model#variant"` (per-batch override).
+2. `worker_model` in ignored `matchflow.local.json` (persistent local choice).
+3. Built-in `opencode-go/deepseek-v4.1-flash#max` (legacy default if neither is set).
+
+Use `provider/model` without `#variant` if you do not want an explicit variant. Do not
+copy `#max` to another model unless it actually offers it. The first slash separates
+provider from model; model IDs may themselves contain slashes. There is no automatic
+fallback, and the orchestrator's own model does not determine the worker model.
+
+`prepare` validates syntax and freezes the resolved model into assignments and claim
+metadata. The Python CLI has no model-catalog access: **online preflight checks the
+service/toolchain, not model availability**. At every `matchflow_launch`, the plugin
+reads OpenCode's active catalog for this checkout and verifies the exact prepared
+provider/model is enabled, chat/tool-capable and has the requested variant. This happens
+before child creation, binding and claiming. Missing models, invalid variants or a
+catalog-read failure produce an actionable setup error with no claim taken.
+
+Changing `worker_model` affects newly prepared batches only. Do not edit existing
+assignments. After a pre-claim model rejection, either make that exact model available
+or prepare a fresh reviewed batch with another explicit model. The catalog check makes
+no paid generation request and cannot prove provider credit, network health or future
+credential validity. Later failures require normal supervision/cleanup; never automatically
+relaunch an ambiguous claim.
 
 ## 4. Install the bridge and validate
 
@@ -161,6 +196,9 @@ start paid matching. See the [runbook](orchestrating.md) when matching is reques
   do not update a timestamp on copied data. Never refresh setup against active workers.
 - **Missing optional twins:** ordinary matching still works. See the command reference
   for the pinned optional install; private derived caches stay in the workspace.
+- **Worker model unavailable:** configure/authenticate its provider in OpenCode, or set
+  your own `worker_model` and prepare a new batch. Check spelling and supported variants.
+  The pre-claim catalog check never changes the model or takes a test claim.
 
 For help, share only sanitized error messages, versions and reproduction steps. Do not
 attach local configuration, keys, packs, checker output, game-derived data or session

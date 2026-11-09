@@ -42,6 +42,12 @@ These are illustrative names, not required paths. On Windows the checker/compile
 run inside WSL with Wine; the checkout and private workspace must be accessible there.
 The setup guide explains Windows versus WSL paths and supplies a complete configuration.
 
+Workers are not tied to OpenCode Go. Set `worker_model` in your ignored
+`matchflow.local.json` to an available tool-capable chat model (`provider/model`, optionally
+`#variant`). `batch.py prepare --model` overrides that setting for one batch. The launcher
+checks OpenCode's active catalog before creating a child or taking a claim and rejects
+unavailable models/variants without fallback. See [model setup](docs/setup.md#choosing-a-worker-model).
+
 Never commit or upload packs, claim candidates, game files, disassembly, checker output,
 databases, session exports or secrets. Ignore rules are a safeguard, not permission to
 put private runtime data in the checkout.

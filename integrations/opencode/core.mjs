@@ -6,10 +6,33 @@ export const workerPermissions = [
 ];
 
 export function modelRef(model) {
-  if (typeof model !== 'string' || !/^[^\s/]+\/[^\s]+$/.test(model)) throw new Error('Explicit model required');
+  if (typeof model !== 'string' || !/^[^/\s#]+\/[^\s#]+(?:#[^/\s#]+)?$/.test(model)) throw new Error('Explicit provider/model[#variant] required');
   const slash = model.indexOf('/');
   const [id, variant] = model.slice(slash + 1).split('#');
   return { providerID: model.slice(0, slash), id, ...(variant ? { variant } : {}) };
+}
+
+export async function requireWorkerModel(ctx, selection) {
+  const ref = modelRef(selection);
+  const remedy = 'Configure that provider in OpenCode, or set worker_model in matchflow.local.json '
+    + 'or use batch.py prepare --model with an available provider/model[#variant]. '
+    + 'Prepare a new batch if changing models; existing assignments are immutable. No claim taken; no automatic fallback.';
+  let catalog;
+  try {
+    catalog = await ctx.model.list({ location: { directory: ctx.location.directory }, types: ['chat'] });
+  } catch {
+    throw new Error(`Cannot validate worker model ${selection} through OpenCode. ${remedy}`);
+  }
+  if (!Array.isArray(catalog?.data)) throw new Error(`Invalid OpenCode model catalog. ${remedy}`);
+  const model = catalog.data.find(m => m.providerID === ref.providerID && m.id === ref.id);
+  if (!model || model.enabled !== true || (model.type !== undefined && model.type !== 'chat')
+      || model.capabilities?.tools !== true) {
+    throw new Error(`Worker model ${selection} is unavailable, disabled, or not a tool-capable chat model. ${remedy}`);
+  }
+  if (ref.variant && (!Array.isArray(model.variants) || !model.variants.some(v => v.id === ref.variant))) {
+    throw new Error(`Worker model variant ${selection} is unavailable. ${remedy}`);
+  }
+  return ref;
 }
 
 export async function workerContext(event, host) {
@@ -64,9 +87,12 @@ export async function launch(ctx, host, input, context) {
   const parent = await ctx.session.get({ sessionID: context.sessionID });
   if (parent.agent === 'match-worker') throw new Error('Matching workers cannot launch sessions');
   const task = await host('task', { ...input, parent: parent.id }, context.signal);
+  // Read the active catalog in this checkout, not a static provider definition.
+  // No child, binding or real claim exists if this local availability check fails.
+  const model = await requireWorkerModel(ctx, task.model);
   const child = await ctx.session.create({
     parentID: parent.id, title: `Matchflow ${input.batch}/${input.worker} ${task.address}`,
-    agent: 'match-worker', model: modelRef(task.model), permissions: workerPermissions,
+    agent: 'match-worker', model, permissions: workerPermissions,
   });
   // Bind before any model sees a prompt or can execute a tool. Never let a prompt
   // choose its own session ID, claim, directory or model. No auto-resume/replay.
