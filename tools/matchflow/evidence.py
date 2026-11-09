@@ -274,7 +274,8 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
         if ack.get('claim_id') != claim or ack.get('address') != task['address']:
             raise ValueError('acknowledgement claim/address mismatch or missing')
         response = ack['response']
-        assessment = acknowledgement(response, ack['operation'], bool(ack.get('source_sha256')))
+        assessment = acknowledgement(response, ack['operation'], bool(ack.get('source_sha256')),
+                                     claim_id=claim, address=task['address'])
         if not assessment['lease_closed']:
             raise ValueError('response did not acknowledge closure')
         handoff = assessment['source_retention']

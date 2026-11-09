@@ -337,6 +337,81 @@ class Controls(unittest.TestCase):
         finally:
             db.close()
 
+    def test_current_flag_proof_ack_requires_exact_claim_and_address(self):
+        response = dict(claim_released='clm_fixture', flagged=[self.task['address']])
+        assessment = service.acknowledgement(response, 'flag-proof', True,
+                                             claim_id='clm_fixture', address=self.task['address'])
+        self.assertTrue(assessment['lease_closed'])
+        self.assertIsNone(assessment['flag_id'])
+        for bad in (dict(response, claim_released='clm_other'),
+                    dict(response, claim_released=True), dict(response, flagged=[]),
+                    dict(response, flagged=self.task['address']),
+                    dict(response, flagged=['0x00999999'])):
+            with self.subTest(response=bad):
+                self.assertFalse(service.acknowledgement(bad, 'flag-proof', True,
+                                 claim_id='clm_fixture', address=self.task['address'])['lease_closed'])
+        self.assertFalse(service.acknowledgement(response, 'flag-proof', True)['lease_closed'])
+        contradictory = dict(response, claim_released='clm_other', released=True, flag_id='flag_fixture')
+        self.assertFalse(service.acknowledgement(contradictory, 'flag-proof', True,
+                         claim_id='clm_fixture', address=self.task['address'])['lease_closed'])
+
+    def test_current_flag_proof_closes_records_and_audits_without_flag_id(self):
+        db_path = self.promoted(diagnostic=True)
+        def api(tool, body):
+            if tool == 'checkpoint':
+                return dict(checkpoint_id='chk_fixture')
+            if tool == 'flag':
+                return dict(claim_released='clm_fixture', flagged=[self.task['address']])
+            return self.api(tool, body)
+        service.close(self.root, self.worker, 'flag-proof', notes=dict(note='Exact alternate flags.'),
+                      db_path=db_path, api=api)
+        with m.connect(db_path) as db:
+            self.assertEqual(m.attempt(db, 'clm_fixture')['state'], 'flag_review')
+            self.assertEqual(m.attempt(db, 'clm_fixture')['checkpoint_id'], 'chk_fixture')
+        service.closing_notes(self.root, self.worker, 'Exact alternate flags proved the discrepancy.',
+                              api=lambda tool, body: dict(checkpoint_id='chk_notes_fixture'))
+        evidence.report(self.root, self.worker, db_path)
+        result = evidence.audit_worker(self.root, self.task, life.snapshot(self.root, self.worker),
+                                       dict(open_claims=[], recent=[]), db_path)
+        self.assertEqual(result['evidence_errors'], [])
+
+    def test_recovered_closure_does_not_restart_notes_window(self):
+        self.claim()
+        life.begin_close(self.root, self.worker)
+        observed = life.stamp()
+        later = life.utc()+timedelta(minutes=31)
+        with patch.object(life, 'utc', return_value=later):
+            life.closed(self.root, self.worker, 'flag_review', self.root/'ack.json', 'submitted',
+                        closed_utc=observed)
+            api = unittest.mock.Mock()
+            with self.assertRaisesRegex(ValueError, 'window expired'):
+                service.closing_notes(self.root, self.worker, 'Recovered proof closing notes.', api=api)
+            api.assert_not_called()
+
+    def test_reconcile_flag_proof_uses_saved_receipt_without_replaying(self):
+        db_path = self.promoted(diagnostic=True)
+        life.begin_close(self.root, self.worker)
+        source = self.root/'match.cpp'
+        (self.root/self.worker/'closure-source.cpp').write_bytes(source.read_bytes())
+        observed = life.stamp()
+        ack_path = self.root/self.worker/'service-ack.json'
+        life.save(ack_path, dict(claim_id='clm_fixture', address=self.task['address'], operation='flag-proof',
+                  observed_utc=observed, source_sha256=m.digest(source), checkpoint_id='chk_fixture',
+                  response=dict(claim_released='clm_fixture', flagged=[self.task['address']]),
+                  assessment=dict(lease_closed=False)))
+        original = ack_path.read_bytes()
+        def api(tool, body):
+            self.assertEqual(tool, 'status')
+            return dict(open_claims=[])
+        with patch.object(life, 'utc', return_value=life.utc()+timedelta(minutes=5)):
+            service.reconcile(self.root, self.worker, api=api, db_path=db_path)
+        state = life.snapshot(self.root, self.worker)
+        self.assertEqual(state['closed_utc'], observed)
+        self.assertEqual(state['outcome'], 'flag_review')
+        self.assertEqual(ack_path.read_bytes(), original)
+        with m.connect(db_path) as db:
+            self.assertEqual(m.attempt(db, 'clm_fixture')['state'], 'flag_review')
+
     def test_managed_registration_rejects_previous_claim_pack(self):
         self.claim()
         old = self.root/'packs'/'clm_previous'

@@ -120,7 +120,7 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
     for action in actions['workers']:
         worker = action['worker']
         # Read-only reconciliation first; close_pending is never replayed.
-        service.reconcile(folder, worker, api=api)
+        service.reconcile(folder, worker, api=api, db_path=db_path)
         state = life.snapshot(folder, worker)
         if state['state'] == 'claimed':
             if action['operation'] != 'giveup':

@@ -215,6 +215,12 @@ running sessions, pending notes and unrelated claims are never auto-cleaned. The
 command performs fresh ownership checks, close, notes, report and independent audit,
 stopping on the first unresolved result. Reports already present are not overwritten.
 
+Flag-proof receipts may return `claim_released` and `flagged` without a `flag_id`.
+Validation requires the exact bound claim and flagged address; legacy `released` plus
+`flag_id` receipts remain supported. Recovery reuses the saved receipt and source
+checkpoint, records `flag_review` locally, and never sends the proof again. It preserves
+the receipt's original closure time, including the 30-minute closing-notes window.
+
 For host recovery after an early setup failure:
 ```text
 python tools/matchflow/service.py notes PRIVATE_BATCH_FOLDER worker01 --notes PRIVATE_CLOSING_NOTES.json

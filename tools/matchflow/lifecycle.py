@@ -275,14 +275,18 @@ def begin_close(folder, worker):
     return state
 
 
-def closed(folder, worker, outcome, ack_path, handoff):
+def closed(folder, worker, outcome, ack_path, handoff, *, closed_utc=None):
     with transaction(folder) as db:
         state = read_worker(db, worker)
         if state['state'] != 'close_pending':
             raise ValueError('no pending closure')
+        observed = timestamp(closed_utc) if closed_utc is not None else utc()
+        if not timestamp(state['worker_start_utc']) <= observed <= utc():
+            raise ValueError('closure timestamp is outside the assignment lifetime')
         state.update(state='closed', outcome=outcome, service_ack_path=str(ack_path),
-                     handoff=handoff, cleanup_required=False, closed_utc=stamp(),
-                     elapsed_seconds=max(0, time.monotonic()-state['monotonic_start']))
+                     handoff=handoff, cleanup_required=False, closed_utc=stamp(observed),
+                     elapsed_seconds=((observed-timestamp(state['worker_start_utc'])).total_seconds()
+                                      if closed_utc is not None else max(0, time.monotonic()-state['monotonic_start'])))
         write_worker(db, worker, state)
     save(Path(folder) / worker / 'ownership.json', state)
     return state

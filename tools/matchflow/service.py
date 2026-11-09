@@ -47,7 +47,7 @@ def claim(folder, worker, api=request):
                 response_path=str(folder / worker / 'claim-response.json'))
 
 
-def reconcile(folder, worker, claim_id=None, api=request):
+def reconcile(folder, worker, claim_id=None, api=request, db_path=ledger.DEFAULT_DB):
     """Read-only remote reconciliation. Never retry a mutation or infer a receipt."""
     folder = Path(folder)
     state = life.snapshot(folder, worker)
@@ -72,26 +72,42 @@ def reconcile(folder, worker, claim_id=None, api=request):
             raise ValueError('saved acknowledgement differs from ownership')
         if any(c['claim_id'] == state['claim_id'] for c in status['open_claims']):
             raise ValueError('claim still open; do not treat acknowledgement/absence assumptions as closure')
-        result = acknowledgement(ack['response'], ack['operation'], bool(ack['source_sha256']))
+        result = acknowledgement(ack['response'], ack['operation'], bool(ack['source_sha256']),
+                                 claim_id=state['claim_id'], address=state['address'])
         if not result['lease_closed']:
             raise ValueError('saved response does not acknowledge closure')
         outcome = ('flag_review' if ack['operation'] == 'flag-proof' else
                    'submitted' if ack['operation'] == 'submit' else 'given_up')
-        life.closed(folder, worker, outcome, ack_path, result['source_retention'])
+        life.closed(folder, worker, outcome, ack_path, result['source_retention'],
+                    closed_utc=ack['observed_utc'])
+        if ack['operation'] == 'flag-proof':
+            with closing(ledger.connect(db_path)) as db:
+                record_closure(db, state['claim_id'], outcome, ack_path, ack, result)
         return dict(state='closed', outcome=outcome, assessment=result,
-                    note='remote receipt recovered; inspect/update local ledger with record before report generation')
+                    note=('saved flag proof reconciled and recorded without replay' if ack['operation'] == 'flag-proof' else
+                          'remote receipt recovered; inspect/update local ledger with record before report generation'))
     return dict(state=state['state'], claim_id=state['claim_id'],
                 note='no mutation performed; remote absence alone is not a closure receipt')
 
 
-def acknowledgement(response, operation, has_source=False):
+def acknowledgement(response, operation, has_source=False, *, claim_id=None, address=None):
     if not isinstance(response, dict):
         raise ValueError('service acknowledgement must be an object; preserve response and reconcile')
     if operation not in ('giveup', 'submit', 'flag-proof'):
         raise ValueError('unsupported service acknowledgement operation')
     if operation == 'flag-proof':
-        return dict(lease_closed=response.get('released') is True and isinstance(response.get('flag_id'), str) and bool(response['flag_id']),
-                    source_retention='submitted', verification='flag_review', flag_id=response.get('flag_id'))
+        legacy = response.get('released') is True and isinstance(response.get('flag_id'), str) and bool(response['flag_id'])
+        if 'claim_released' in response:
+            legacy = False
+            flagged = response.get('flagged')
+            released = (isinstance(claim_id, str) and bool(claim_id) and
+                        response['claim_released'] == claim_id and isinstance(address, str) and
+                        isinstance(flagged, list) and address in flagged)
+        else:
+            released = False
+        valid = bool(legacy or released)
+        return dict(lease_closed=valid, source_retention='submitted' if valid else 'unknown',
+                    verification='flag_review' if valid else 'unknown', flag_id=response.get('flag_id'))
     if operation == 'submit':
         sid = response.get('submission_id')
         valid = isinstance(sid, str) and bool(sid)
@@ -102,6 +118,23 @@ def acknowledgement(response, operation, has_source=False):
     return dict(lease_closed=response.get('released') is True,
                 source_retention=('retained' if kept else 'failed') if has_source else 'not_applicable',
                 verification='not_submitted')
+
+
+def record_closure(db, cid, outcome, ack_path, ack, assessment):
+    if not db.execute('SELECT 1 FROM attempts WHERE claim_id=?', (cid,)).fetchone():
+        return
+    response = ack['response']
+    if outcome == 'submitted':
+        identifier = response['submission_id']
+    elif outcome == 'flag_review':
+        # The current API returns no flag ID. Use the real source checkpoint,
+        # never invent an identifier or rewrite the historical response.
+        identifier = response.get('flag_id') or ack.get('checkpoint_id')
+    else:
+        identifier = str(ack_path)
+    ledger.record(db, argparse.Namespace(claim=cid, kind=outcome, identifier=identifier,
+                                        checkpoint=ack.get('checkpoint_id'),
+                                        note='source retention: ' + assessment['source_retention']))
 
 
 def closing_notes_record(folder, worker, state=None):
@@ -288,7 +321,7 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
                     no_source_reason=no_source_reason, checkpoint_id=checkpoint_id)
     # Even a malformed mutation response is durable before interpretation.
     life.save(ack_path, envelope)
-    assessment = acknowledgement(response, operation, bool(source))
+    assessment = acknowledgement(response, operation, bool(source), claim_id=cid, address=state['address'])
     envelope['assessment'] = assessment
     life.save(ack_path, envelope)
     if not assessment['lease_closed']:
@@ -297,12 +330,7 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
     life.closed(folder, worker, outcome, ack_path, assessment['source_retention'])
     # Remote acknowledgement remains durable even if local recording fails.
     with closing(ledger.connect(db_path)) as db:
-        if db.execute('SELECT 1 FROM attempts WHERE claim_id=?', (cid,)).fetchone():
-            args = argparse.Namespace(claim=cid, kind=outcome,
-                                      identifier=response['submission_id'] if operation == 'submit' else
-                                      response['flag_id'] if operation == 'flag-proof' else str(ack_path),
-                                      checkpoint=checkpoint_id, note='source retention: ' + assessment['source_retention'])
-            ledger.record(db, args)
+        record_closure(db, cid, outcome, ack_path, envelope, assessment)
     return envelope
 
 
@@ -324,7 +352,7 @@ def main():
     args = parser.parse_args()
     try:
         result = (closing_notes(args.folder, args.worker, life.load(args.notes)['note']) if args.command == 'notes' else
-                  reconcile(args.folder, args.worker, args.claim_id) if args.command == 'reconcile' else
+                  reconcile(args.folder, args.worker, args.claim_id, db_path=args.db) if args.command == 'reconcile' else
                   claim(args.folder, args.worker) if args.command == 'claim' else
                   close(args.folder, args.worker, args.command, source=getattr(args, 'source', None),
                         notes=life.load(args.notes) if hasattr(args, 'notes') else None,

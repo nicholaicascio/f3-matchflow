@@ -151,6 +151,52 @@ class ScreenRecoveryTests(unittest.TestCase):
             recovery.apply(self.folder, self.recovery_action(), ledger.DEFAULT_DB, api)
         api.assert_not_called()
 
+    def test_finish_current_flag_proof_preserves_receipt_and_never_replays(self):
+        self.owned_fixture()
+        self.call('write', path='best.cpp', text='void f() {}')
+        result = dict(status='match', ndiff_insn=0, diffs=0, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(result), '')):
+            self.call('check', source='best.cpp', stage='baseline', flags='/MT,/O1', why='Diagnostic baseline')
+            self.call('gate', decision='continue', reason='Exact diagnostic baseline',
+                      hypothesis='Retain diagnostic code', expected='MATCH')
+            self.call('check', source='best.cpp', stage='final', flags='/MT,/O1', why='Freeze proof',
+                      observed='Diagnostic baseline matched')
+        self.call('promote')
+        worker = self.folder/'worker01'
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            row = ledger.attempt(db, 'clm_fixture')
+            (worker/'closure-source.cpp').write_bytes(Path(row['artifact_path']).read_bytes())
+        life.begin_close(self.folder, 'worker01')
+        life.save(worker/'service-ack.json', dict(claim_id='clm_fixture', address='0x00123456',
+                  operation='flag-proof', observed_utc=life.stamp(),
+                  source_sha256=ledger.digest(worker/'closure-source.cpp'), checkpoint_id='chk_proof',
+                  response=dict(claim_released='clm_fixture', flagged=['0x00123456']),
+                  assessment=dict(lease_closed=False)))
+        receipt = (worker/'service-ack.json').read_bytes()
+        life.setup_step(self.folder, 'worker01', 'ready')
+        broker.completion('ses_child1')
+        actions = self.recovery_action()
+        actions['workers'][0]['operation'] = 'finish'
+        calls = []
+        def api(tool, body):
+            calls.append(tool)
+            if tool == 'status':
+                return dict(open_claims=[])
+            if tool == 'checkpoint':
+                self.assertEqual(body['phase'], 'notes')
+                self.assertNotIn('source', body)
+                return dict(checkpoint_id='chk_notes')
+            raise AssertionError('No proof replay allowed: '+tool)
+        self.assertTrue(recovery.apply(self.folder, actions, ledger.DEFAULT_DB, api)['ok'])
+        self.assertEqual(calls.count('checkpoint'), 1)
+        self.assertEqual((worker/'service-ack.json').read_bytes(), receipt)
+        report = (worker/'report.json').read_bytes()
+        self.assertEqual(life.load(worker/'report.json')['outcome'], 'flag_review')
+        self.assertTrue(recovery.apply(self.folder, actions, ledger.DEFAULT_DB, api)['ok'])
+        self.assertEqual(calls.count('checkpoint'), 1)
+        self.assertEqual((worker/'report.json').read_bytes(), report)
+
     def test_recovery_rejects_changed_prepared_assignment_before_mutation(self):
         self.owned_fixture()
         self.call('write', path='best.cpp', text='int f() { return 1; }')
