@@ -25,7 +25,7 @@ class Controls(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.worker = 'worker01'
         (self.root/self.worker).mkdir()
         self.task = dict(id=self.worker, address='0x00123456', model='test/model#max')
@@ -401,7 +401,7 @@ class Controls(unittest.TestCase):
             return self.api(tool, body)
         service.close(self.root, self.worker, 'flag-proof', notes=dict(note='Exact alternate flags.'),
                       db_path=db_path, api=api)
-        with m.connect(db_path) as db:
+        with closing(m.connect(db_path)) as db:
             self.assertEqual(m.attempt(db, 'clm_fixture')['state'], 'flag_review')
             self.assertEqual(m.attempt(db, 'clm_fixture')['checkpoint_id'], 'chk_fixture')
         service.closing_notes(self.root, self.worker, 'Exact alternate flags proved the discrepancy.',
@@ -445,7 +445,7 @@ class Controls(unittest.TestCase):
         self.assertEqual(state['closed_utc'], observed)
         self.assertEqual(state['outcome'], 'flag_review')
         self.assertEqual(ack_path.read_bytes(), original)
-        with m.connect(db_path) as db:
+        with closing(m.connect(db_path)) as db:
             self.assertEqual(m.attempt(db, 'clm_fixture')['state'], 'flag_review')
 
     def test_managed_registration_rejects_previous_claim_pack(self):

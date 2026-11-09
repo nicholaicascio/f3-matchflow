@@ -1,5 +1,6 @@
 """Shared fixed-address assignment pipeline. No service writes or credentials."""
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -89,7 +90,7 @@ def prepare(name, selection_path, model=DEFAULT_MODEL):
     ledger_path = ROOT / 'work' / 'matchflow' / 'ledger.sqlite3'
     if ledger_path.exists():
         import sqlite3
-        with sqlite3.connect(ledger_path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(ledger_path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             for target in selection['targets']:
                 rows = db.execute('SELECT verdict FROM server_results WHERE address=? AND verdict IS NOT NULL',
                                   (target['address'],)).fetchall()

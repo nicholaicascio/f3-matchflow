@@ -11,7 +11,7 @@ class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        self.base = Path(self.temp.name).resolve()
         self.repo = self.base/'repo'; self.repo.mkdir()
         self.workspace = self.base/'workspace'; self.workspace.mkdir()
         (self.workspace/'AGENTS.md').write_text('Offline fixture policy')

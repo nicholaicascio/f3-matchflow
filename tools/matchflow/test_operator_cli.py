@@ -18,7 +18,7 @@ class OperatorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.patch = patch.object(cli, 'workspace_root', return_value=self.root)
         self.patch.start(); self.addCleanup(self.patch.stop)
         self.screen = self.root/'screen'
@@ -158,7 +158,7 @@ class OperatorTests(unittest.TestCase):
 
     def test_checks_and_claims_are_filtered_and_do_not_expose_raw_payloads(self):
         path = self.root/'fixture.sqlite3'
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.execute('CREATE TABLE attempts(claim_id,address,state,model,variant,created,deadline,final_check_id,submission_id)')
             db.execute('INSERT INTO attempts VALUES(?,?,?,?,?,?,?,?,?)',
                        ('clm_fixture', self.info['address'], 'given_up', 'fixture/model', 'max', 'now', 'later', None, None))
@@ -172,7 +172,7 @@ class OperatorTests(unittest.TestCase):
         self.assertEqual(cli.inspect_ledger(path, 'checks', claim='other')['rows'], [])
 
     def test_lifecycle_is_bounded_filtered_and_read_only(self):
-        with sqlite3.connect(self.root/'lifecycle.sqlite3') as db:
+        with closing(sqlite3.connect(self.root/'lifecycle.sqlite3')) as db, db:
             db.execute('CREATE TABLE workers(id,payload)')
             for i in range(2):
                 db.execute('INSERT INTO workers VALUES(?,?)', (f'worker{i+1:02}', json.dumps(

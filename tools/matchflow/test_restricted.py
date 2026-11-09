@@ -26,7 +26,7 @@ class ScopeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
 
     def test_rejects_traversal_absolute_unc_drive_ads_devices(self):
         for value in ('../tool.py', 'a/../../x', '/etc/passwd', 'C:\\x', 'C:x', '\\\\host\\share',
@@ -83,7 +83,7 @@ class BrokerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
         for module, name, value in ((batch, 'ROOT', self.root), (batch, 'BATCHES', self.root/'work/batches'),
                                     (broker, 'workspace_root', lambda: self.root),
