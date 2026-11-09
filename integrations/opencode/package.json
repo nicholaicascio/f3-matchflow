@@ -2,6 +2,7 @@
   "name": "f3-matchflow-opencode",
   "private": true,
   "version": "3.0.0",
+  "license": "MIT",
   "type": "module",
   "exports": { ".": "./index.mjs" },
   "devDependencies": { "@opencode/plugin": "2.2.6" },

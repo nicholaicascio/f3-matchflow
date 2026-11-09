@@ -1,7 +1,13 @@
 # f3-matchflow
 
-This repository holds orchestration code only. The configured private workspace is
-separate and retains its own matching policies, game installation and artifacts.
+This repository holds orchestration code and canonical local policy. The configured
+private workspace is separate and retains private runtime artifacts, not another
+pipeline or an authoritative policy copy. Official dependencies and the game stay external.
+
+For a new installation read `docs/setup.md`; for matching follow
+`docs/orchestrating.md` and the canonical `docs/matching-policy.md`. Start the parent
+from this checkout. Worker editable files live in the configured external workspace,
+not in this repository or a new worktree. `CONTRIBUTING.md` covers offline-only changes.
 
 ## Matching orchestration from this checkout
 
@@ -24,6 +30,12 @@ availability, history and reports under the workspace policy, select exact addre
 then prepare reviewed selection/status JSON and use the pipeline command reference.
 Code/configuration tests never authorize claims or paid worker launches. Start those
 only when the user requests them. Keep all runtime artifacts in the external workspace.
+
+Use `operator_cli.py` for status snapshots, review templates/evidence-backed selections,
+and bounded read-only ledger/lifecycle inspection; use `batch.py audit-worker` and
+`debrief` for closure summaries. Do not reimplement these steps as temp-folder scripts.
+New reusable capabilities belong in this repository with offline tests. Review facts
+remain human/agent annotations; never re-date copied service facts to make them fresh.
 
 Matching launches use `matchflow_launch` and the dedicated `match-worker` agent only.
 The host binds each child session before its first prompt. Do not dispatch matching

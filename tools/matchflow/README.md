@@ -4,6 +4,11 @@ Run from this checkout. Policy: [`../../docs/matching-policy.md`](../../docs/mat
 The external workspace is private runtime storage, not a second copy of our tools.
 OpenCode 2.2.6 is the tested plugin SDK/CLI version. Only restricted subagents launch.
 
+New installation? Start with [setup and folder layout](../../docs/setup.md), then the
+[orchestrator runbook](../../docs/orchestrating.md). The commands here assume the
+separate official kit is already installed and the host is Windows with WSL/Wine.
+Do not run setup/preflight against an active matching workspace.
+
 ## Install and diagnose
 
 Configure ignored `matchflow.local.json` (or `F3_MATCHFLOW_WORKSPACE` for workspace):
@@ -88,6 +93,46 @@ a concrete `next_experiment`; prior unfit also requires an `integration_plan`. `
 may be true because of verdicts or because you discovered it; `prepare` merges known local
 verdicts. A saved draft is starting material, never a selection preference.
 Status JSON is `{"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","status": ACTUAL_SERVICE_STATUS}`.
+
+### Supported preparation helpers (no temporary Python scripts)
+
+`operator_cli.py` is orchestrator-only. It never claims, compiles, launches workers or
+mutates the service. Create a review template from the saved screen, edit that private
+JSON with the actual review findings, then join it to the original service evidence:
+
+```text
+python tools/matchflow/operator_cli.py review-template --screen PRIVATE_SCREEN_FOLDER --output review-annotations.json
+python tools/matchflow/operator_cli.py selection --screen PRIVATE_SCREEN_FOLDER --annotations PRIVATE_ANNOTATIONS.json --output selection.json
+python tools/matchflow/operator_cli.py status --output status-before-dispatch.json
+```
+
+Relative **output** paths resolve under the external `work/matchflow/`; input paths
+(`--screen`, `--annotations`) are explicit paths relative to the current directory or
+absolute. Outputs must be inside the external workspace, reject links/reparse points,
+and are created exclusively, never overwritten. Choose a new name for each snapshot.
+
+The template has `targets`, each with only `address`, `reason` and `review`. Remove
+unselected targets. Fill in the reason and every review fact from the evidence;
+`history_reviewed=false` and unknown/empty fields are intentionally not ready to dispatch.
+No service metadata belongs in annotations. Review substantive history and report scope
+yourself; the command does not invent hypotheses or mark history reviewed for you.
+
+Selection joins at most 50 targets to unchanged `info-*.json` receipts in the screen's
+shortlist, validates the existing selection/review contract, and preserves the **oldest
+selected function_info timestamp**, plus each receipt's path and hash. Re-saving annotations
+cannot refresh old facts: receipts older than 15 minutes fail. Re-screen and review again
+when stale; there is no automatic replacement, refresh or retry. `batch.py prepare` still
+merges known local verdicts and enforces integration requirements as before.
+
+Status calls `start_here` then `status` once each through the trusted transport, saves the
+actual status response in the format consumed by dispatch/audit, and returns notices.
+An adjacent `OUTPUT.start.json` preserves the start response, including one-shot notices,
+even if status fails. On failure inspect that receipt before trying again; no retry is
+automatic. The snapshot's conservative timestamp is the request start, not a copied
+response with a newly invented timestamp. It does not run preflight or authorize launches.
+
+Use the generated selection and status paths with prepare/dispatch below. After workers
+finish, create another status snapshot for audit instead of reusing the dispatch snapshot.
 
 ```text
 python tools/matchflow/batch.py prepare BATCH --selection PRIVATE_SELECTION.json
@@ -174,6 +219,28 @@ continue gate and final check before promotion. No local result proves server ve
 or full-unit compatibility.
 
 ## Closure, failure and audit
+
+### Bounded read-only local inspection
+
+These commands replace ad-hoc SQL and lifecycle dump scripts. They use SQLite `mode=ro`
+and `query_only`, never create/migrate databases, and expose only named summary columns,
+not source, raw checker output or arbitrary SQL. Output is private JSON on stdout.
+
+```text
+python tools/matchflow/operator_cli.py inspect claims --address ACTUAL_ADDRESS --limit 20
+python tools/matchflow/operator_cli.py inspect checks --claim ACTUAL_CLAIM --limit 20 --offset 0
+python tools/matchflow/operator_cli.py inspect verdicts --address ACTUAL_ADDRESS
+python tools/matchflow/operator_cli.py inspect lifecycle --batch BATCH --worker worker01
+```
+
+Ledger inspection uses the configured workspace's `work/matchflow/ledger.sqlite3`.
+Lifecycle inspection requires a batch and optionally an exact worker. Every inspection
+supports `--limit` (1..100, default 20) and `--offset` (default 0); filters are optional
+except `--batch` for lifecycle. Missing databases fail instead of creating empty ones.
+Local state is not proof of closure or server verification; use the identity-safe audit
+for those conclusions. `batch.py debrief` now also returns `handoff_note` from the validated
+acknowledged closing-notes receipt and `remaining` from the report; absent notes stay null.
+It never reconstructs a give-up reason from missing data or rewrites historical reports.
 
 ### Scoped observability and identity-safe audits
 

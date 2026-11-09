@@ -356,6 +356,12 @@ def debrief(name, status_path=None):
                        report.get('address') != task['address'] or report.get('session_id') != state.get('session_id')):
             raise ValueError('report identity mismatch; audit before debrief')
         retained = report.get('retained_check') or {}
+        closing = report.get('closing_notes') or {}
+        # local_completion above validates the receipt/hash and exact identity.
+        # Read prose only from the acknowledged receipt, never reconstruct it.
+        handoff_note = None
+        if integrity['complete'] and closing.get('status') == 'acknowledged':
+            handoff_note = load(path/task['id']/'closing-notes.json')['request']['note']
         rows.append(dict(worker=task['id'], address=task['address'], claim_id=state.get('claim_id'),
                          session_id=state.get('session_id'), model=task['model'],
                          outcome=report.get('outcome', state.get('outcome')), report_complete=integrity['complete'],
@@ -365,7 +371,8 @@ def debrief(name, status_path=None):
                          near_miss=(report.get('near_miss') or {}).get('status'),
                          measured_near_miss=isinstance(retained.get('ndiff_insn'), int) and
                                             0 < retained['ndiff_insn'] <= 40 and retained.get('valid') is True,
-                         permuter_runs=len(report.get('permute_runs') or [])))
+                          permuter_runs=len(report.get('permute_runs') or []),
+                          handoff_note=handoff_note, remaining=report.get('remaining', [])))
     result = dict(batch=name, generated_utc=now(), workers=rows,
                   counts=dict(assignments=len(rows), reports_complete=sum(r['report_complete'] for r in rows),
                               submitted=sum(r['outcome'] == 'submitted' for r in rows),

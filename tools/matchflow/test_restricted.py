@@ -336,6 +336,8 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(summary['counts']['submitted'], 1)
         self.assertEqual(summary['workers'][0]['verification'], 'unknown_without_fresh_status')
         self.assertEqual(summary['workers'][0]['retained_check_id'], report['retained_check']['check_id'])
+        self.assertEqual(summary['workers'][0]['handoff_note'], 'Literal wrapper matched.')
+        self.assertEqual(summary['workers'][0]['remaining'], report['remaining'])
         milestones = batch.monitor('test')['events']
         self.assertEqual([m['event'] for m in milestones], ['claim_closed', 'notes_complete', 'report_complete'])
         saved = life.load(self.folder/'worker01/report.json')

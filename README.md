@@ -1,67 +1,89 @@
 # f3-matchflow
 
-Private orchestration tooling for f3decomp. **Our code, policy, prompts, wrappers and
-tests live here.** The external git-free workspace contains official dependencies,
-the contributor's game and generated private runtime artifacts, not another pipeline.
+Orchestration tooling for [f3decomp](https://f3decomp.com): screen functions without
+claiming them, assign exact targets to restricted OpenCode subagents, preserve checker
+evidence, and audit claim closure. Matching work can incur model costs and mutate your
+contributor account. Installation and offline tests never authorize matching runs.
 
-## Restricted subagents
+This is **not** Fallout 3 source, a game distribution, a compiler, or a replacement for
+the official f3decomp checker. You need your own legitimately purchased compatible PC
+copy of Fallout 3 and a service account. The [official guide](https://f3decomp.com/agents.md)
+governs contributions, account approval, toolchain installation and game compatibility.
 
-The orchestrator screens and assigns one exact function per worker. `matchflow_launch`
-creates a dedicated `match-worker` child, binds its real session, claims just in time,
-obtains the exact pack and registers evidence before sending the prepared prompt.
+## Start here
 
-Workers have only session-scoped matching tools: own-folder candidate edits, read-only
-pack/references, managed official checks and own-claim checkpoints/closure. No general
-shell, raw service credentials, target selection, sibling access or tooling edits.
-Both permission rules and host-side capabilities enforce the boundary. This is not an
-OS sandbox. Legacy general/headless/Workflow matching launch paths are disabled.
+1. Read the [installation and folder-layout guide](docs/setup.md).
+2. Install the official dependencies and configure your private external workspace.
+3. Install the local OpenCode bridge and pass online preflight.
+4. For authorized matching, follow the [orchestrator runbook](docs/orchestrating.md).
 
-## Setup
+**Run OpenCode from this repository, not from the game folder or runtime workspace.**
+The orchestrator stays here. Workers are bound child sessions whose writable source
+area is an external `work/batches/BATCH/workerNN/files/` directory, not a Git worktree.
 
-Requires Python 3.10+, Node 22+, OpenCode V2 (tested SDK/CLI 2.2.6), and the separately
-installed official checker/compiler plus WSL/Wine on Windows. Configure ignored local
-`matchflow.local.json` with an external absolute workspace, e.g.:
-
-```json
-{"workspace":"F:/Games/f3decomp"}
-```
-
-`F3_MATCHFLOW_WORKSPACE` overrides that path. Runtime data and credentials may not live
-in this repository. Credentials default to the existing private OS-local key file.
+## Keep code and private data separate
 
 ```text
-npm ci --ignore-scripts --prefix integrations/opencode
-python tools/matchflow/bootstrap.py
-python tools/matchflow/preflight.py --online
+code/f3-matchflow/                 Public Git checkout; tooling, docs, tests
+  matchflow.local.json             Your ignored machine-specific configuration
+  opencode.jsonc                  Generated ignored OpenCode bridge
+
+private/f3-workspace/              External, git-free runtime workspace
+  packs/                          Exact claim packs (downloaded by the host)
+  work/batches/                   Assignments, worker files, receipts, reports
+  work/matchflow/                  Ledger, checked-source snapshots, screening data
+
+games/Fallout 3/Fallout3.exe        Your private game, optionally inside the workspace
+toolchains/f3kit/                  Separately installed official checker/compiler
+private-credentials/api-key        Outside BOTH checkout and runtime workspace
 ```
 
-Bootstrap writes the ignored local OpenCode bridge, loading repository policy, official
-service guide, local plugin and external key-file reference. It preserves custom
-configuration. No setup/test command starts paid workers or takes real claims.
+These are illustrative names, not required paths. On Windows the checker/compiler
+run inside WSL with Wine; the checkout and private workspace must be accessible there.
+The setup guide explains Windows versus WSL paths and supplies a complete configuration.
 
-See [command reference](tools/matchflow/README.md) for configuration, central selection,
-subagent dispatch, safe recovery and optional pinned f3twins integration. Canonical local
-policy is [docs/matching-policy.md](docs/matching-policy.md); matching techniques load
-on demand from [docs/matching-recipes.md](docs/matching-recipes.md). Official contribution
-rules at https://f3decomp.com/agents.md take precedence.
+Never commit or upload packs, claim candidates, game files, disassembly, checker output,
+databases, session exports or secrets. Ignore rules are a safeguard, not permission to
+put private runtime data in the checkout.
 
-`screen.py` prepares bounded read-only shortlist evidence. `batch.py recover` inventories
-closures, with explicit reviewed actions required to apply recovery. Checked sources are
-snapshotted by hash so give-up can retain an earlier check even after STOP. Ready-session
-cleanup is worker-scoped; setup failures, cooldowns and explicit batch stops remain global.
+## How it works
 
-## Source boundaries and tests
+- `screen.py` saves a bounded read-only shortlist. Review history and report scope before
+  selecting; neither a saved draft nor a near-miss count proves a target is ready.
+- `operator_cli.py` provides status snapshots, review templates, evidence-backed selections
+  and bounded read-only ledger/lifecycle inspection. No temp-folder Python is required.
+- `batch.py` prepares immutable assignments, supervises workers, audits exact identities
+  and summarizes results. Recovery requires explicit reviewed per-worker actions.
+- `matchflow_launch` binds a dedicated `match-worker` child before its first prompt,
+  takes one exact-address claim just in time and obtains its exact pack.
+- Workers use session-scoped tools only: own files, read-only context/references, official
+  checks, notes and own-claim closure. No shell, credentials, sibling access or selection.
 
-Tracked: source, sanitized fixtures, policy, templates, dependency locks and CI.
-Ignored/external: packs, game/toolchain, sources under claim, raw output/disassembly,
-databases, logs, keys and caches. Public optional dependencies install under `.deps`;
-their derived private data stays in the external workspace. Never stage private files.
-Workspace junctions/deployed workflow copies are no longer required or authoritative.
+This is a tool-capability boundary, **not an OS sandbox**. Trusted host plugins have
+host authority. General/headless/Workflow matching launch paths are disabled. Local
+MATCH, submitted and server-verified are distinct states.
 
-```text
-python -m unittest discover -s tools/matchflow -v
-npm test --prefix integrations/opencode
-```
+## Requirements and support
 
-CI tests Python on Windows/Linux and the pinned OpenCode plugin SDK. Live matching is
-separate from offline verification and requires an explicit matching request.
+Python 3.10+, Node 22+, OpenCode V2 (tested CLI/plugin SDK **2.2.6**), and separately
+installed official dependencies. The live checker runner currently targets **Windows
+with WSL/Wine**. Offline tests run on Windows and Linux; that does not establish native
+Linux/macOS live orchestration support. OpenChamber can supply the background shell
+notifications used by the runbook; another host needs equivalent reliable monitoring.
+
+## Documentation
+
+- [Setup, private paths and troubleshooting](docs/setup.md)
+- [Orchestrator runbook](docs/orchestrating.md)
+- [Full command and worker-tool reference](tools/matchflow/README.md)
+- [Canonical local matching policy](docs/matching-policy.md)
+- [Matching techniques](docs/matching-recipes.md)
+- [Contributing and offline testing](CONTRIBUTING.md)
+- [Pinned optional dependencies](third_party/README.md)
+
+## License
+
+Original tooling and documentation are [MIT licensed](LICENSE). Separately installed
+dependencies retain their own licenses. This license grants no rights to Fallout 3,
+private context packs or other service-provided materials. f3-matchflow is a contributor
+tool, not an official Bethesda product.
