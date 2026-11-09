@@ -1,6 +1,6 @@
 # f3-matchflow
 
-Orchestration tooling for [f3decomp](https://f3decomp.com): screen functions without
+OpenCode V2 matching orchestration for [f3decomp](https://f3decomp.com): screen functions without
 claiming them, assign exact targets to restricted OpenCode subagents, preserve checker
 evidence, and audit claim closure. Matching work can incur model costs and mutate your
 contributor account. Installation and offline tests never authorize matching runs.
@@ -9,6 +9,22 @@ This is **not** Fallout 3 source, a game distribution, a compiler, or a replacem
 the official f3decomp checker. You need your own legitimately purchased compatible PC
 copy of Fallout 3 and a service account. The [official guide](https://f3decomp.com/agents.md)
 governs contributions, account approval, toolchain installation and game compatibility.
+
+## Harness support
+
+**Live matching currently requires OpenCode V2.** Choosing a different model provider
+does not remove that requirement. The OpenCode plugin supplies worker launches, session
+identity binding, scoped tools, model-availability checks and completion notifications.
+
+The Python utilities for screening, reviewed-selection preparation and read-only local
+inspection can run independently of OpenCode, with their documented configuration and
+dependencies. They are not an alternative worker-launch path.
+
+Claude Code, Codex and other agent harnesses are **not currently supported for matching
+execution**. Users of those harnesses can install OpenCode to run Matchflow, but cannot
+simply copy the worker prompt or launch workers through a general subagent tool. A new
+harness integration would need to implement and test the same identity, permission,
+supervision and evidence-backed closure safeguards before it could be supported.
 
 ## Start here
 
@@ -75,7 +91,8 @@ Python 3.10+, Node 22+, OpenCode V2 (tested CLI/plugin SDK **2.2.6**), and separ
 installed official dependencies. The live checker runner currently targets **Windows
 with WSL/Wine**. Offline tests run on Windows and Linux; that does not establish native
 Linux/macOS live orchestration support. OpenChamber can supply the background shell
-notifications used by the runbook; another host needs equivalent reliable monitoring.
+notifications used by the runbook; another interface hosting OpenCode needs equivalent
+reliable monitoring. This does not imply support for a different agent harness.
 
 ## Documentation
 
