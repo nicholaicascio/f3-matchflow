@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelRef, launch, workerPermissions } from './core.mjs';
+import { modelRef, launch, workerPermissions, invoke } from './core.mjs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 test('model binding is explicit and deny-by-default covers every other tool', () => {
   assert.deepEqual(modelRef('provider/model#max'), {providerID:'provider', id:'model', variant:'max'});
@@ -94,4 +97,30 @@ test('lost cleanup barrier is explicitly unresolved and never triggers setup ret
   assert.equal(result.cleanup_required,true);
   assert.equal(result.barrier_persisted,false);
   assert.equal(starts,1);
+});
+
+test('host protocol rejects non-object JSON and preserves safe structured errors', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'matchflow-protocol-'));
+  try {
+    const script = join(folder, 'fake-host.cjs');
+    writeFileSync(script, `
+      process.stdin.resume();
+      process.stdin.on('end', () => {
+        const mode = process.argv[2];
+        if (mode === 'error') {
+          console.log(JSON.stringify({error:'closure notes must be an object',error_type:'AttributeError',cleanup_required:true}));
+          process.exitCode = 2;
+        } else if (mode === 'invalid') {
+          process.stderr.write('PRIVATE DIAGNOSTIC');
+          process.exitCode = 2;
+        } else console.log(mode);
+      });
+    `);
+    for (const mode of ['null', '[]', '42', 'invalid']) {
+      await assert.rejects(invoke(process.execPath, script, mode, {}), /Invalid Matchflow host result/);
+    }
+    await assert.rejects(invoke(process.execPath, script, 'error', {}), /closure notes must be an object \[AttributeError\]/);
+  } finally {
+    rmSync(folder, {recursive:true, force:true});
+  }
 });

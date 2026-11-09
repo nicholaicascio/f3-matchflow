@@ -45,6 +45,11 @@ policy is [docs/matching-policy.md](docs/matching-policy.md); matching technique
 on demand from [docs/matching-recipes.md](docs/matching-recipes.md). Official contribution
 rules at https://f3decomp.com/agents.md take precedence.
 
+`screen.py` prepares bounded read-only shortlist evidence. `batch.py recover` inventories
+closures, with explicit reviewed actions required to apply recovery. Checked sources are
+snapshotted by hash so give-up can retain an earlier check even after STOP. Ready-session
+cleanup is worker-scoped; setup failures, cooldowns and explicit batch stops remain global.
+
 ## Source boundaries and tests
 
 Tracked: source, sanitized fixtures, policy, templates, dependency locks and CI.

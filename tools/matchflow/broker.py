@@ -62,7 +62,7 @@ def bind(name, worker, session, parent):
     assignment = scoped(folder, worker+'/assignment.json', exists=True)
     if ledger.digest(assignment) != task['assignment_sha256']:
         raise ValueError('assignment changed after preparation')
-    state = life.require_experiment(folder, worker)
+    state = life.require_start(folder, worker)
     if state['method'] != 'subagents':
         raise ValueError('only restricted subagents enabled')
     with closing(registry()) as db, db:
@@ -93,7 +93,7 @@ def task(name, worker, parent):
         raise ValueError('unknown restricted assignment')
     if ledger.digest(scoped(folder, worker+'/assignment.json', exists=True)) != target['assignment_sha256']:
         raise ValueError('assignment changed')
-    life.require_experiment(folder, worker)
+    life.require_start(folder, worker)
     return target
 
 
@@ -172,7 +172,15 @@ def completion(session, metadata=None):
     folder, worker = Path(row['folder']), row['worker']
     result = worker_call(session, 'completion', {})
     if result['cleanup_required']:
-        (folder/'STOP').touch()
+        state = life.snapshot(folder, worker)
+        if state.get('setup_state') == 'ready':
+            life.request_worker_cleanup(folder, worker, 'session_ended_without_complete_closure')
+        else:
+            life.request_cleanup(folder, worker, 'session_ended_during_setup')
+    with life.transaction(folder) as db:
+        state = life.read_worker(db, worker)
+        state.setdefault('session_finished_utc', life.stamp())
+        life.write_worker(db, worker, state)
     if metadata is not None:
         if not isinstance(metadata, dict) or metadata.get('id') != session:
             raise ValueError('completion metadata does not identify the bound child')
@@ -216,7 +224,8 @@ def worker_call(session, op, data, api=service.request):
     cid = state.get('claim_id')
     if op == 'status':
         return dict(target=assignment['target'], ownership=state, phase=life.phase(state),
-                    close_requested=(folder/worker/'CLOSE_REQUESTED.json').exists() or (folder/'STOP').exists())
+                    close_requested=bool(state.get('closure_requested')) or
+                                    (folder/worker/'CLOSE_REQUESTED.json').exists() or (folder/'STOP').exists())
     if op == 'completion':
         try:
             notes_complete = state['state'] == 'closed' and service.closing_notes_record(folder, worker, state)['status'] in ('acknowledged', 'not_applicable')
@@ -306,7 +315,7 @@ def worker_call(session, op, data, api=service.request):
             raise ValueError('bounded text content required')
         path.parent.mkdir(parents=True, exist_ok=True)
         no_links(path)
-        path.write_text(text, encoding='utf-8')
+        path.write_bytes(text.encode('utf-8'))
         return dict(path=data['path'], sha256=ledger.digest(path))
     if not cid:
         raise ValueError('host has not registered an owned claim')
@@ -357,7 +366,7 @@ def worker_call(session, op, data, api=service.request):
             raise ValueError('checkpoint outcome ambiguous; parent must reconcile, no retry')
         life.save(path, dict(request=body, state='pending'))
         response = api('checkpoint', body)
-        acknowledged = isinstance(response.get('checkpoint_id'), str) and bool(response['checkpoint_id'])
+        acknowledged = isinstance(response, dict) and isinstance(response.get('checkpoint_id'), str) and bool(response['checkpoint_id'])
         life.save(path, dict(request=body, response=response, state='acknowledged' if acknowledged else 'unresolved'))
         if not acknowledged:
             raise ValueError('checkpoint not acknowledged; preserve response and reconcile')
@@ -367,9 +376,23 @@ def worker_call(session, op, data, api=service.request):
         if operation not in ('submit', 'giveup', 'flag-proof'):
             raise ValueError('unsupported closure')
         source = str(scoped(files, data['source'], exists=True)) if data.get('source') else None
+        if 'check_id' in data:
+            if source or operation != 'giveup':
+                raise ValueError('check_id selects a frozen giveup source; do not combine it with source or submission')
+            from snapshots import checked_source
+            with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+                source = str(checked_source(db, cid, data['check_id']))
         result = service.close(folder, worker, operation, source=source, notes=data.get('notes'),
                                no_source_reason=data.get('no_source_reason'), db_path=ledger.DEFAULT_DB, api=api)
         return result['assessment']
+    if op == 'checks':
+        # Closure-safe inspection, no compile, restoration, edits or sibling data.
+        from snapshots import available
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            checks = db.execute('SELECT * FROM checks WHERE claim_id=? ORDER BY id DESC LIMIT 100', (cid,)).fetchall()
+            return dict(checks=[{**{k: v for k, v in evidence.check_record(db, c).items()
+                                    if k != 'evidence_path'},
+                                'snapshot_available': available(c)} for c in checks])
     if op == 'report':
         return evidence.report(folder, worker, db_path=ledger.DEFAULT_DB)
     raise ValueError('operation not available to workers')
@@ -379,8 +402,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['task', 'bind', 'start', 'worker', 'completion', 'failure'])
     args = parser.parse_args()
-    value = json.loads(sys.stdin.read(MAX_TEXT + 4096))
+    value = {}
     try:
+        text = sys.stdin.read(MAX_TEXT + 4096)
+        if len(text) > MAX_TEXT:
+            raise ValueError('host input exceeds limit')
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ValueError('host input must be an object')
         if args.command == 'task':
             result = task(value['batch'], value['worker'], value['parent'])
         elif args.command == 'bind':
@@ -397,14 +426,24 @@ def main():
         return 0
     except ServiceError as exc:
         if exc.code in (429, 503):
-            row, _, _ = binding(value['session'])
-            folder = Path(row['folder'])
-            (folder/'STOP').touch()
-            life.save(folder/'SERVICE_COOLDOWN.json', dict(observed_utc=life.stamp(), message=str(exc)))
+            try:
+                row, _, _ = binding(value['session'])
+                folder = Path(row['folder'])
+                (folder/'STOP').touch()
+                life.save(folder/'SERVICE_COOLDOWN.json', dict(observed_utc=life.stamp(), message=str(exc)))
+            except Exception:
+                print(json.dumps(dict(error=str(exc), cooldown_persistence_failed=True, cleanup_required=True)))
+                return 2
         print(json.dumps(dict(error=str(exc), cleanup_required=True)))
         return 2
     except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
         print(json.dumps(dict(error=str(exc), cleanup_required=True)))
+        return 2
+    except Exception as exc:
+        # Never put a traceback, source, credentials or exception payload on the wire.
+        # Reservations are deliberately left intact for read-only reconciliation.
+        print(json.dumps(dict(error='Unexpected Matchflow host failure; reconcile without retry',
+                              error_type=type(exc).__name__, cleanup_required=True)))
         return 2
 
 

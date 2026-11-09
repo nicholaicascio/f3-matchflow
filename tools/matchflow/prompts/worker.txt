@@ -1,5 +1,7 @@
 Work ONLY on assigned function $address in the $lane lane.
 Selection reason: $reason
+Treat selection hypotheses as tentative. Prior checked drafts and original instructions
+take precedence; do not spend probes defending an unconfirmed parent guess.
 The host already owns the exact claim, pack, session binding and deadlines. Never select,
 claim, replace or refill targets. You have ONLY matchflow_worker scoped tools, no shell.
 Call status first, then reference(policy), read(packet), list(pack), and read the target's
@@ -20,6 +22,10 @@ close(submit) only uses the promoted normal-flags artifact; close(flag-proof) re
 exact diagnostic MATCH; otherwise close(giveup) with best source and structured notes.
 Never retry ambiguous mutations. Report cleanup_required immediately on failure.
 If unfit history is discovered, ask the parent to reclassify before further work.
+Giveup notes MUST be an object with string fields reason, category, tried, still_differs,
+suspected_cause, never an encoded JSON string. Use checks to inspect own check IDs and
+close(giveup, check_id=...) to hand off any exact checked snapshot even after STOP;
+do not overwrite candidates or compile again to recover a best source.
 After acknowledged closure, save checkpoint(notes) and obtain its receipt, then report.
 Give-up prose or a pre-closure checkpoint does not count as closing notes. Final answer is one
 RESULT line: address, outcome, report path, claim ID, cleanup_required. Never claim server

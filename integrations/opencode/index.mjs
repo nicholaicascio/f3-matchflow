@@ -2,7 +2,12 @@ import { fileURLToPath } from 'node:url';
 import { invoke, launch, workerContext } from './core.mjs';
 
 const script = fileURLToPath(new URL('../../tools/matchflow/broker.py', import.meta.url));
-const object = { type: 'object', additionalProperties: true };
+const object = { type: 'object', additionalProperties: true, properties: {
+  notes: { type: 'object', additionalProperties: false, properties: Object.fromEntries(
+    ['reason', 'category', 'tried', 'still_differs', 'suspected_cause', 'note'].map(key => [key, { type: 'string' }])) },
+  check_id: { type: 'integer', minimum: 1 },
+  no_source_reason: { type: 'string', minLength: 1 },
+} };
 
 // Plugin.define is an identity helper in the pinned V2 SDK. Export its structural
 // contract directly so production has no third-party runtime dependency graph.
@@ -31,7 +36,7 @@ const plugin = {
       });
       editor.add({
         name: 'matchflow_worker',
-        description: 'Session-scoped matching tools. op: status, target(offset,limit; own assigned function only, private local inspection), read(area=files|pack|packet,path,offset,limit), list/search(area,text), write(path,text), reference(name=policy|recipe|compiler_tips|large_functions|upstream_tips|fnv), twin, check(source,stage,change,why,expect,observed,regions,flags), gate(decision,reason,hypothesis,expected,integration_plan), register_wall(evidence), promote, checkpoint(phase,note), close(operation,source,notes,no_source_reason), report. Paths are relative. No shell, claims, replacement targets or arbitrary URLs.',
+        description: 'Session-scoped matching tools. op: status, target(offset,limit; own assigned function only, private local inspection), read(area=files|pack|packet,path,offset,limit), list/search(area,text), write(path,text), reference(name=policy|recipe|compiler_tips|large_functions|upstream_tips|fnv), twin, check(source,stage,change,why,expect,observed,regions,flags), checks (own IDs, metrics and snapshot availability), gate(decision,reason,hypothesis,expected,integration_plan), register_wall(evidence), promote, checkpoint(phase,note), close(operation,source OR check_id,notes OBJECT with reason/category/tried/still_differs/suspected_cause,no_source_reason), report. check_id selects an own checked giveup snapshot and works after STOP without compiling or editing. Paths are relative. No shell, claims, replacement targets or arbitrary URLs.',
         input: { type: 'object', properties: { op: { type: 'string' }, data: object },
           required: ['op'], additionalProperties: false },
         options: { codemode: false },

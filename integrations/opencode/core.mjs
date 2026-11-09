@@ -45,7 +45,14 @@ export function invoke(python, script, command, value, signal) {
       let result;
       try { result = JSON.parse(output); }
       catch { return reject(new Error('Invalid Matchflow host result; reconcile without retry')); }
-      if (code !== 0) return reject(new Error(result.error || 'Matchflow operation failed; cleanup_required'));
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        return reject(new Error('Invalid Matchflow host result shape; reconcile without retry'));
+      }
+      if (code !== 0) {
+        const kind = typeof result.error_type === 'string' && /^[A-Za-z_]{1,64}$/.test(result.error_type)
+          ? ` [${result.error_type}]` : '';
+        return reject(new Error((result.error || 'Matchflow operation failed; cleanup_required') + kind));
+      }
       resolve(result);
     });
     child.stdin.on('error', () => {});

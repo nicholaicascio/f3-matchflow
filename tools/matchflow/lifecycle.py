@@ -162,6 +162,8 @@ def experiment_state(db, folder, worker):
     control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
     if control.get('cleanup_barrier'):
         raise ValueError('batch cleanup barrier active; reconcile, no new starts or checks')
+    if state.get('closure_requested'):
+        raise ValueError('worker closure requested; no more experiments')
     heartbeat = control.get('heartbeat')
     if heartbeat is None or not 0 <= time.monotonic() - heartbeat <= 30:
         raise ValueError('watchdog missing/stale; closure only, do not resume experiments')
@@ -177,6 +179,30 @@ def experiment_state(db, folder, worker):
 def require_experiment(folder, worker):
     with transaction(folder) as db:
         return experiment_state(db, folder, worker)
+
+
+def require_start(folder, worker):
+    with transaction(folder) as db:
+        control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+        if control.get('start_barrier'):
+            raise ValueError('new starts blocked pending worker reconciliation; existing healthy workers may finish')
+        return experiment_state(db, folder, worker)
+
+
+def request_worker_cleanup(folder, worker, reason):
+    """A completed ready session cannot run more checks; siblings keep their budgets."""
+    folder = Path(folder)
+    with transaction(folder) as db:
+        state = read_worker(db, worker)
+        state.update(closure_requested=True, cleanup_required=True)
+        state.setdefault('completion_failure', dict(reason=reason, requested_utc=stamp()))
+        write_worker(db, worker, state)
+        control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+        control.setdefault('start_barrier', dict(worker=worker, reason=reason, requested_utc=stamp()))
+        db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(control),))
+    save(folder/worker/'CLOSE_REQUESTED.json', dict(worker=worker, reason=reason,
+         claim_id=state['claim_id'], session_id=state['session_id'], cleanup_required=True))
+    return dict(stopped=True, scope='worker', cleanup_required=True, worker=worker)
 
 
 def setup_step(folder, worker, stage):
@@ -208,6 +234,9 @@ def request_cleanup(folder, worker, reason):
 
 def reserve_claim(folder, worker):
     with transaction(folder) as db:
+        control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+        if control.get('start_barrier'):
+            raise ValueError('new starts blocked pending worker reconciliation')
         state = experiment_state(db, folder, worker)
         if state['claim_attempted'] or state['state'] != 'dispatched':
             raise ValueError('one claim attempt per assignment; reconcile, never retry')

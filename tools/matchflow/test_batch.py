@@ -69,8 +69,9 @@ class BatchTests(unittest.TestCase):
     def test_band_rejected(self):
         with self.assertRaises(ValueError): batch.validate_selection(self.selection(address='<=255'))
 
-    def test_user_exclusion(self):
-        with self.assertRaises(ValueError): batch.validate_selection(self.selection(address='0x00ad1250'))
+    def test_no_address_specific_exclusion(self):
+        targets = batch.validate_selection(self.selection(address='0x00ad1250'))
+        self.assertEqual(targets[0]['address'], '0x00ad1250')
 
     def test_held_rejected(self):
         with self.assertRaises(ValueError): batch.validate_selection(self.selection(co_workers=1))

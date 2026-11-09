@@ -16,7 +16,9 @@ def command(arguments, mode='check'):
     config = runtime()
     for field in ('image', 'index', 'symbols', 'checker', 'compiler', 'wine_prefix'):
         config[field] = wsl_path(config[field])
-    return ['wsl', '-d', config['distro'], '-u', config['user'], '--', 'bash',
+    # WSL's plain -- still invokes the Linux user's shell and expands note text.
+    # --exec bypasses it; check.sh only forwards literal argv through "$@".
+    return ['wsl', '-d', config['distro'], '-u', config['user'], '--exec', 'bash',
             wsl_path(REPOSITORY / 'tools/matchflow/check.sh'),
             '--runtime-json', json.dumps(config, separators=(',', ':')),
             '--key-file', wsl_path(key_file()), '--mode', mode, '--', *arguments]

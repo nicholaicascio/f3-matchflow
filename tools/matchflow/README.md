@@ -51,11 +51,30 @@ official checker through configured WSL/Wine without sourcing workspace shell sc
 Credentials are loaded privately inside the trusted runner, never passed in argv.
 An enforced `--` boundary separates trusted runner options from checker arguments.
 Notes are forwarded as literal `--name=value` data, never runner configuration.
+WSL is started with `--exec`, bypassing its implicit shell so backticks/`$()` in
+notes are not evaluated before reaching the runner.
 
 ## Screen and prepare (orchestrator only)
 
 Use the official service tools: start_here, status, list_bands, list_functions and
 function_info. Review history/reports without claiming. Save fresh actual metadata:
+
+For a bounded first pass (read-only remotely, no game inspection or agents):
+
+```text
+python tools/matchflow/screen.py --output screening-01 --count 8 --max-pages 2 --max-size 1023
+```
+
+Relative outputs live under the external `work/matchflow/`. The command calls
+start_here first, then status/bands, up to two 500-entry catalog pages, and function_info
+only for the final shortlist. Responses, notices and relevant local ledger history are
+preserved without scanning source trees. File reports are
+review signals, not automatic evidence of a defect in every function. No claim, source
+hypothesis, lane or clean history is invented. `review.json` is NOT an accepted selection:
+review history, file reports and known local verdicts, annotate evidence and choose lanes
+before preparing the selection below. A raced target is not replaced automatically.
+Do not exhaustively page every band or inspect original game instructions by default.
+Insufficient candidates produce an incomplete review, not more requests in a retry loop.
 
 ```json
 {"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","targets":[{"address":"0x00abcdef","size":160,"state":"open","co_workers":0,"lane":"research","give_ups":4,"open_problem_reports":0,"file_problem_reports":0,"history_reviewed":true,"history_sources":["function_info and saved prior report paths"],"prior_verdicts":[],"verdict_history":"unknown","new_hypothesis":"Named receiver removes the documented duplicate reload","expected_observation":"Receiver reload disappears without changing call order","reason":"Reviewed structural lead; not repeating exhausted sweeps"}]}
@@ -109,11 +128,17 @@ Operations:
 - `check`: `source`, `stage=baseline|attempt|final`, `change/why/expect`, `observed`
   from check two, and required `regions`. Optional complete comma-separated codegen
   `flags` is allowlisted; include/output/path/compiler-injection options are refused.
+- `checks`: own check IDs/metrics/flags and durable snapshot availability, even after STOP.
+  Every new check saves the exact input bytes under host-owned external
+  `work/matchflow/sources/CLAIM/HASH.cpp` before compiling. Editing a working file cannot
+  destroy an earlier source. Old checks without snapshots remain explicitly unavailable.
 - `gate`: `decision`, `reason`, `hypothesis`, `expected`, optional `integration_plan`.
 - `register_wall`: evidence for a register/slot-only wall; does not reset clocks.
 - `promote`: freezes only an unchanged final official MATCH to host-owned `match.cpp`.
-- `close`: `operation=submit|giveup|flag-proof`. Giveup uses `source` plus `notes` containing
+- `close`: `operation=submit|giveup|flag-proof`. Giveup uses `source` OR `check_id` plus `notes` containing
   reason/category/tried/still_differs/suspected_cause, or explicit `no_source_reason`.
+  Notes MUST be a JSON object, not an encoded string. `check_id` selects only an own,
+  valid checked snapshot, verifies its hash and works after STOP with no edits or compile.
   Flag-proof needs `notes.note`. Submit uses only the host's promoted artifact.
 - `report`: generates a canonical v3 evidence report after closure and acknowledged
   closing notes. Unclaimed blocked assignments do not require closing notes.
@@ -142,12 +167,16 @@ promotion/submission of an unchanged final MATCH, giving up and closing notes.
 Supervisor loss/STOP means closure only. The parent must respond to monitor completion,
 inspect exact sessions and reconcile only its owned claims. Completion notices are
 event-driven. OpenCode/plugin restarts never automatically replay work or reset leases.
+After a monitor notification, re-arm `batch.py monitor BATCH` if other workers remain.
+Its durable cursor suppresses already-notified requests but still wakes on escalation.
 
 Transport exceptions, invalid responses and ambiguous mutations preserve claim/closure
 reservations. Never relaunch to repair them. HTTP 401, 403 edge rejection/access denial,
 429 and 503 are distinguished without printing keys or response bodies. 429/503 writes
 STOP/cooldown evidence; failures without acknowledged closure stop new starts and wake
-the parent. No browser impersonation, global retry loop or official checker patching.
+the parent. Completion of a ready worker requests only its own closure; healthy siblings
+keep their original experiment budgets. The durable start barrier prevents new launches.
+No browser impersonation, global retry loop or official checker patching.
 Host setup or prompt-admission failure persists a batch-wide cleanup barrier before
 returning. The barrier is latched in lifecycle storage; deleting STOP does not clear it.
 Reconcile that batch and prepare a fresh reviewed batch, never automatically resume it.
@@ -157,6 +186,34 @@ If a worker crashes or setup fails after a claim, the parent uses existing host-
 flag-proof as appropriate, then reconciles. A lost claim response needs the exact claim
 ID confirmed by official status. Missing receipt is unresolved, not invented success.
 Closing notes remain required. No automatic bulk cleanup, unrelated release or claim retry.
+
+To reduce recovery round-trips, inventory the whole batch in one read-only remote call:
+
+```text
+python tools/matchflow/batch.py recover BATCH
+```
+
+This lists exact assignments, leases, receipts, notes and checked-source IDs without
+mutating the service. To close specific finished sessions, prepare a private reviewed
+actions JSON and opt in explicitly:
+
+```json
+{"batch":"BATCH","workers":[{"worker":"worker01","address":"ACTUAL_ADDRESS","claim_id":"ACTUAL_CLAIM_ID","session_id":"ACTUAL_SESSION_ID","session_finished":true,"operation":"giveup","check_id":123,"notes":{"reason":"Actual stopping reason","category":"instruction_order","tried":"Actual experiments and measured results","still_differs":"Actual remaining offsets/regions","suspected_cause":"Evidence-backed next hypothesis"},"closing_note":"Substantive final handoff for this function"}]}
+```
+
+```text
+python tools/matchflow/batch.py recover BATCH --actions PRIVATE_REVIEWED_ACTIONS.json --apply
+```
+
+Only explicitly listed, exact bound identities with host completion evidence may be
+touched. Use `source` (relative to that worker's files) plus its reviewed `source_sha256`
+instead of `check_id` for a legacy candidate, or an explicit `no_source_reason`. `operation: "finish"`
+only completes notes/report/audit after acknowledged closure. Existing acknowledged
+notes are validated rather than sent again; `closing_note` is required when missing.
+Pending/unacknowledged mutations stop recovery without replay. Wrong identities,
+running sessions, pending notes and unrelated claims are never auto-cleaned. The
+command performs fresh ownership checks, close, notes, report and independent audit,
+stopping on the first unresolved result. Reports already present are not overwritten.
 
 For host recovery after an early setup failure:
 ```text
@@ -178,6 +235,9 @@ available for operator investigation; they are not worker capabilities.
 Report v3 independently validates closing-notes claim/session/phase, post-closure
 timestamps, checkpoint acknowledgement and receipt hash. Historical reports/receipts
 remain untouched and are not relabelled v3 or accepted without the required proof.
+New ordinary reports also include `retained_check`: the check whose hash describes
+`closure-source.cpp`, separate from `latest_valid`. It is null for an unchecked handoff.
+Audits verify this link and any new source snapshot; old reports remain unchanged.
 
 The launcher captures raw child-session usage at completion. Aggregate it with
 `python tools/matchflow/usage.py PRIVATE_BATCH_FOLDER --method subagents`. Missing

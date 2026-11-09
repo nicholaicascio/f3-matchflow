@@ -164,6 +164,8 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
         final = next((c for c in reversed(checks) if c['valid'] and c['stage'] == 'final'), None)
         latest = next((c for c in reversed(checks) if c['valid']), None)
         source = folder / worker / 'closure-source.cpp'
+        source_hash = ledger.digest(source) if source.exists() else None
+        retained = next((c for c in reversed(checks) if c['valid'] and c['source_hash'] == source_hash), None)
         elapsed = state['elapsed_seconds']
         result = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=state['claim_id'],
                       lane=row['lane'], model=assignment['claim_body']['model'],
@@ -172,10 +174,11 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
                       worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
                       elapsed_seconds=elapsed, elapsed_estimated=False,
                       candidate_path=str(source) if source.exists() else None,
-                      source_sha256=ledger.digest(source) if source.exists() else None,
+                       source_sha256=source_hash,
                       pack_path=row['pack_path'], pack_sha256=row['pack_hash'],
                       baseline=check_record(db, baseline), final=check_record(db, final),
-                      latest_valid=check_record(db, latest),
+                       latest_valid=check_record(db, latest),
+                       retained_check=check_record(db, retained),
                       checked_flags=json.loads(latest['flags_json']) if latest else [],
                       service=dict(submission_id=ack['response'].get('submission_id'), checkpoint_id=ack.get('checkpoint_id'),
                                    flag_id=ack['response'].get('flag_id'),
@@ -203,12 +206,17 @@ def validate_check(item, claim, pack_hash, folder, errors, db_path, stage):
                 recorded['source_hash'] != item.get('source_sha256') or
                 json.loads(recorded['command_json']) != cmd or
                 json.loads(recorded['flags_json']) != item.get('flags') or
-                (stage != 'latest_valid' and recorded['stage'] != stage)):
+                (stage not in ('latest_valid', 'retained_check') and recorded['stage'] != stage)):
             raise ValueError('ledger check ID/provenance/flags/stage mismatch')
         if cmd.count('--claim') != 1 or cmd[cmd.index('--claim')+1] != claim or '--json' not in cmd:
             raise ValueError('checker invocation does not name this claim and JSON mode')
         if raw.get('pack_hash') != pack_hash or raw.get('source_hash') != item.get('source_sha256'):
             raise ValueError('checker hashes differ from report')
+        snapshot = raw.get('source_snapshot_path')
+        if snapshot or ('source_snapshot_path' in recorded.keys() and recorded['source_snapshot_path']):
+            if ('source_snapshot_path' not in recorded.keys() or recorded['source_snapshot_path'] != snapshot or
+                    ledger.digest(snapshot) != recorded['source_hash']):
+                raise ValueError('source snapshot hash/path differs from check evidence')
         result = ledger.diagnose_result(raw['stdout'], raw['stderr'], raw['exit_code'])
         if raw.get('unchanged') is not True or result.get('status') != item.get('status'):
             raise ValueError('checker result is invalid or inconsistent')
@@ -349,6 +357,24 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
                 errors.append('handoff source hash differs from candidate')
         for key in ('baseline', 'final', 'latest_valid'):
             validate_check(value.get(key), claim, value['pack_sha256'], worker, errors, db_path, key)
+        if 'retained_check' in value:
+            retained = value['retained_check']
+            validate_check(retained, claim, value['pack_sha256'], worker, errors, db_path, 'retained_check')
+            if retained and retained['source_sha256'] != value['source_sha256']:
+                errors.append('retained check does not describe the handed-off source')
+            with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+'?mode=ro', uri=True)) as db:
+                found = db.execute('SELECT id FROM checks WHERE claim_id=? AND source_hash=? AND valid=1',
+                                   (claim, value['source_sha256'])).fetchone()
+            if found and not retained:
+                errors.append('report omits the retained source check linkage')
+        else:
+            with closing(sqlite3.connect(Path(db_path).resolve().as_uri()+'?mode=ro', uri=True)) as db:
+                columns = {row[1] for row in db.execute('PRAGMA table_info(checks)')}
+                found = ('source_snapshot_path' in columns and db.execute(
+                    'SELECT id FROM checks WHERE claim_id=? AND source_hash=? AND valid=1 AND source_snapshot_path IS NOT NULL',
+                    (claim, value['source_sha256'])).fetchone())
+            if found:
+                errors.append('new checked-source handoff requires retained_check linkage')
         if value['outcome'] == 'submitted':
             final = value.get('final') or {}
             if (final.get('status') != 'match' or final.get('source_sha256') != value['source_sha256'] or

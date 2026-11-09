@@ -11,7 +11,7 @@ The external workspace stores official dependencies and private runtime artifact
   Screen without claims. Review availability, ownership, reports, substantive history,
   known verdicts and exclusions. Never fabricate service metadata.
 - One exact address per assignment, no bands, co-work, replacements, reclaims or refills.
-  Exclude user-blocked 0x00ad1250. Production requires reviewed clean history; recurring
+  Production requires reviewed clean history; recurring
   blockers need research with a concrete new hypothesis; prior unfit requires integration.
 - Default worker model remains opencode-go/deepseek-v4.1-flash#max; honor explicit human
   overrides. Record actual model, variant, harness and usage, never guessed billing.
@@ -20,6 +20,9 @@ The external workspace stores official dependencies and private runtime artifact
   before work, validates ownership, obtains the exact pack and registers evidence.
 - Only dedicated match-worker sessions with deny-by-default scoped tools may match.
   General subagents, legacy headless and Workflows are disabled for matching.
+- Keep orchestration bounded: use the read-only screen CLI, inspect only the final
+  shortlist, then review actual histories/reports. No game/disassembly scans or
+  speculative source hypotheses by default. Selection leads are tentative, not facts.
 
 ## Worker method
 
@@ -47,6 +50,11 @@ The external workspace stores official dependencies and private runtime artifact
 - STOP, stale/missing supervisor or closure marker means freeze and close, no new probes.
   This applies equally to `final` checks: no new compilation may start after stopping.
   A host monitor must run in the background so the parent wakes for closure requests.
+- A ready worker ending without complete closure requests cleanup for that worker and
+  blocks new launches, not healthy siblings' experiments. Setup/prompt-admission failures,
+  service cooldowns and an explicit batch STOP remain batch-wide. Barriers are durable;
+  removing markers does not reopen experiments. Re-arm the monitor after a notification
+  while other workers remain; repeated requests are deduplicated until escalation.
 - Final official MATCH plus unchanged source/pack/flags permits promotion and submission.
   Alternate-flags proof uses source-bearing checkpoint plus flag-proof. Otherwise give
   up with exact best C++ and category/tried/still_differs/suspected_cause/reason.
@@ -56,6 +64,12 @@ The external workspace stores official dependencies and private runtime artifact
   checks the acknowledged closing-notes receipt independently of give-up/submit prose and
   reconciles fresh official status and actual receipts, including after crashes/quota
   failures. Never release unrelated claims. Missing leases alone are not acknowledgements.
+- Every new check preserves its exact source by hash. After STOP use an own check ID
+  for give-up, without editing or recompiling. Reports link the handed-off source to
+  its check separately from the latest check. Historical evidence is not rewritten.
+- Recovery inventory is read-only remotely. Applying recovery needs an explicit reviewed
+  per-worker action list, exact claim/session/address and host completion evidence.
+  Never replay pending mutations, automatically choose sources/notes or clean up unrelated claims.
 - Local MATCH, submitted, server verified and integrated are different states. Only
   official verdicts establish verified credit. Failed source retention remains a failure.
 

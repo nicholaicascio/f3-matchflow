@@ -50,8 +50,6 @@ def validate_selection(selection):
         if not re.fullmatch(r'0x[0-9a-f]{8}', address) or address in seen:
             raise ValueError('Use unique canonical 0x addresses, not bands')
         seen.add(address)
-        if address == '0x00ad1250':
-            raise ValueError('User-excluded target; choose another function')
         if target.get('state') != 'open' or target.get('co_workers', 0):
             raise ValueError('Only currently open, unheld functions may be dispatched')
         if target.get('lane') not in ('production', 'research', 'integration') or not target.get('reason'):
@@ -190,10 +188,21 @@ def monitor(name):
         if heartbeat is None or not 0 <= time.monotonic()-heartbeat <= 30:
             return dict(state='supervisor_lost', cleanup_required=True, note='Closure only; reconcile owned sessions/claims.')
         due = [dict(worker=t['id'], claim_id=s['claim_id'], session_id=s['session_id'], phase=lifecycle.phase(s))
-               for t, s in zip(tasks, states) if s['state'] != 'closed' and
-               (lifecycle.phase(s) != 'experiment' or (path/t['id']/'CLOSE_REQUESTED.json').exists() or (path/'STOP').exists())]
+                for t, s in zip(tasks, states) if s['state'] != 'closed' and
+                (s.get('closure_requested') or lifecycle.phase(s) != 'experiment' or
+                 (path/t['id']/'CLOSE_REQUESTED.json').exists() or (path/'STOP').exists())]
         if due:
-            return dict(state='closure_requested', workers=due, cleanup_required=True)
+            # Re-arming the parent monitor must wait for NEW requests, not spin on
+            # the same unfinished worker. Deadlines escalating to reconcile are new.
+            with lifecycle.transaction(path) as db:
+                current = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+                seen = current.setdefault('monitor_seen', [])
+                fresh_due = [item for item in due if item not in seen]
+                if fresh_due:
+                    seen.extend(fresh_due)
+                    db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(current),))
+                    return dict(state='closure_requested', workers=fresh_due, cleanup_required=True,
+                                note='Re-arm monitor while other workers remain; only new requests or escalation wake it.')
         time.sleep(5)
 
 
@@ -236,6 +245,21 @@ def audit(name, status_path):
                 note='Never release unrelated claims; inspect missing ownership and verify checker/ack evidence separately')
 
 
+def recover(name, actions_path=None, apply=False, api=None):
+    import recovery
+    import matchflow as ledger
+    from transport import request
+    api = api or request
+    path = batch_path(name)
+    if apply:
+        if not actions_path:
+            raise ValueError('--apply requires an explicit reviewed --actions file')
+        return recovery.apply(path, load(actions_path), db_path=ledger.DEFAULT_DB, api=api)
+    if actions_path:
+        raise ValueError('--actions requires --apply; default recover is inventory only')
+    return recovery.inventory(path, api('status', {}), db_path=ledger.DEFAULT_DB)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
@@ -244,6 +268,7 @@ def main():
     p = sub.add_parser('audit'); p.add_argument('batch'); p.add_argument('--status', required=True)
     p = sub.add_parser('dispatch'); p.add_argument('batch'); p.add_argument('--method', choices=['workflow', 'subagents'], required=True); p.add_argument('--status', required=True)
     p = sub.add_parser('monitor'); p.add_argument('batch')
+    p = sub.add_parser('recover'); p.add_argument('batch'); p.add_argument('--actions'); p.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     try:
         if args.command == 'prepare':
@@ -254,6 +279,8 @@ def main():
             print(json.dumps(dispatch(args.batch, args.method, args.status), indent=2))
         elif args.command == 'monitor':
             print(json.dumps(monitor(args.batch), indent=2))
+        elif args.command == 'recover':
+            print(json.dumps(recover(args.batch, args.actions, args.apply), indent=2))
         else:
             result = audit(args.batch, args.status)
             print(json.dumps(result, indent=2))

@@ -142,6 +142,9 @@ def connect(path):
     if 'assignment_path' not in {r[1] for r in db.execute('PRAGMA table_info(attempts)')}:
         db.execute('ALTER TABLE attempts ADD COLUMN assignment_path TEXT')
         db.commit()
+    if 'source_snapshot_path' not in {r[1] for r in db.execute('PRAGMA table_info(checks)')}:
+        db.execute('ALTER TABLE checks ADD COLUMN source_snapshot_path TEXT')
+        db.commit()
     return db
 
 
@@ -261,7 +264,12 @@ def check(db, args):
     if pack_hash != row["pack_hash"]:
         raise ValueError("pack inputs changed since registration; obtain/review the correct pack")
     source = Path(args.source).resolve()
-    source_hash = digest(source)
+    source_bytes = source.read_bytes()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    source_stable = digest(source) == source_hash
+    from snapshots import freeze
+    evidence = Path(args.evidence_dir or DEFAULT_DB.parent / "checks")
+    snapshot = freeze(evidence.parent, args.claim, source_bytes)
     pack = load(pack_path / "pack.json")
     requested = flags(args.flags)
     from checker import command
@@ -303,17 +311,17 @@ def check(db, args):
         elapsed = time.monotonic() - start
     result = diagnose_result(run.stdout, run.stderr, run.returncode)
     used = result.get("accepted_flags", requested or pack["flags"])
-    unchanged = digest(source) == source_hash and tree_digest(pack_path) == pack_hash
+    unchanged = source_stable and digest(source) == source_hash and tree_digest(pack_path) == pack_hash
     valid = unchanged and result["status"] not in ('tool_error', 'rejected')
     if result["status"] == "match":
         valid = valid and run.returncode == 0 and "VS2005 SP1" in result.get("checker", "")
-    evidence = Path(args.evidence_dir or DEFAULT_DB.parent / "checks")
     evidence.mkdir(parents=True, exist_ok=True)
     # No diff or source enters the database. Raw official output stays in private work/.
     raw = {"command": cmd, "stdout": run.stdout, "stderr": run.stderr,
            "source_hash": source_hash, "pack_hash": pack_hash,
            "exit_code": run.returncode, "unchanged": unchanged, "seconds": elapsed,
-           "captured_utc": now(), "imported_from": str(imported) if imported else None}
+           "captured_utc": now(), "imported_from": str(imported) if imported else None,
+           "source_snapshot_path": str(snapshot)}
     evidence_path = evidence / f"{args.claim}_{time.time_ns()}.json"
     evidence_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     compact = {k: v for k, v in result.items() if k not in {"diff", "slots", "errors"}}
@@ -326,6 +334,7 @@ def check(db, args):
                          (args.claim, args.stage, now(), elapsed, str(source), source_hash,
                           pack_hash, json.dumps(used), json.dumps(cmd), json.dumps(compact),
                           run.returncode, int(valid), str(evidence_path)))
+        db.execute('UPDATE checks SET source_snapshot_path=? WHERE id=?', (str(snapshot), cur.lastrowid))
         event(db, args.claim, "check", {"check_id": cur.lastrowid, "stage": args.stage})
     if row.get('assignment_path') and valid and args.stage != 'final':
         assigned = Path(row['assignment_path'])

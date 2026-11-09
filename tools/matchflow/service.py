@@ -85,13 +85,18 @@ def reconcile(folder, worker, claim_id=None, api=request):
 
 
 def acknowledgement(response, operation, has_source=False):
+    if not isinstance(response, dict):
+        raise ValueError('service acknowledgement must be an object; preserve response and reconcile')
+    if operation not in ('giveup', 'submit', 'flag-proof'):
+        raise ValueError('unsupported service acknowledgement operation')
     if operation == 'flag-proof':
-        return dict(lease_closed=response.get('released') is True and bool(response.get('flag_id')),
+        return dict(lease_closed=response.get('released') is True and isinstance(response.get('flag_id'), str) and bool(response['flag_id']),
                     source_retention='submitted', verification='flag_review', flag_id=response.get('flag_id'))
     if operation == 'submit':
         sid = response.get('submission_id')
-        return dict(lease_closed=bool(sid), source_retention='submitted' if sid else 'unknown',
-                    submission_id=sid, verification='pending' if sid else 'unknown')
+        valid = isinstance(sid, str) and bool(sid)
+        return dict(lease_closed=valid, source_retention='submitted' if valid else 'unknown',
+                    submission_id=sid, verification='pending' if valid else 'unknown')
     retained = response.get('best_code')
     kept = isinstance(retained, str) and retained.startswith('best_code kept:')
     return dict(lease_closed=response.get('released') is True,
@@ -165,11 +170,16 @@ def closing_notes(folder, worker, note, api=request):
     # Reserve before mutation; ambiguous transport stays pending without replay.
     life.save(path, value)
     response = api('checkpoint', body)
-    acknowledged = isinstance(response.get('checkpoint_id'), str) and bool(response['checkpoint_id'])
+    acknowledged = isinstance(response, dict) and isinstance(response.get('checkpoint_id'), str) and bool(response['checkpoint_id'])
     value.update(response=response, observed_utc=life.stamp(), state='acknowledged' if acknowledged else 'unresolved')
     life.save(path, value)
     if not acknowledged:
         raise ValueError('closing notes not acknowledged; preserve response and reconcile')
+    with life.transaction(folder) as db:
+        current = life.read_worker(db, worker)
+        if current['state'] == 'closed':
+            current['cleanup_required'] = False
+            life.write_worker(db, worker, current)
     return dict(saved=True, **closing_notes_record(folder, worker, state))
 
 
@@ -195,6 +205,11 @@ def submit_artifact(db, cid, proof=False):
 
 def close(folder, worker, operation, source=None, notes=None, no_source_reason=None,
           db_path=ledger.DEFAULT_DB, api=request):
+    # Validate model-controlled shapes before any network or closure reservation.
+    if notes is not None and not isinstance(notes, dict):
+        raise ValueError('closure notes must be an object, not encoded JSON or a list')
+    if no_source_reason is not None and (not isinstance(no_source_reason, str) or not no_source_reason.strip()):
+        raise ValueError('no-source reason must be substantive text')
     folder = Path(folder)
     state = life.snapshot(folder, worker)
     cid = state['claim_id']
@@ -259,19 +274,22 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
         life.save(folder / worker / 'proof-checkpoint-request.json', checkpoint)
         saved = api('checkpoint', checkpoint)
         life.save(folder / worker / 'proof-checkpoint-response.json', saved)
-        checkpoint_id = saved.get('checkpoint_id')
-        if not checkpoint_id:
+        checkpoint_id = saved.get('checkpoint_id') if isinstance(saved, dict) else None
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
             raise ValueError('proof checkpoint not acknowledged; preserve response and reconcile')
         response = api('flag', dict(claim_id=cid, scope='function', category='pack_problem', note=notes['note'],
                                    compile_flags=proof_flags, checkpoint_id=checkpoint_id, keep_claim=False))
     else:
         response = api(operation, body)
     ack_path = folder / worker / 'service-ack.json'
-    assessment = acknowledgement(response, operation, bool(source))
     envelope = dict(claim_id=cid, address=state['address'], operation=operation,
-                    observed_utc=life.stamp(), response=response, assessment=assessment,
+                    observed_utc=life.stamp(), response=response, assessment=None,
                     source_sha256=ledger.digest(frozen) if source else None,
                     no_source_reason=no_source_reason, checkpoint_id=checkpoint_id)
+    # Even a malformed mutation response is durable before interpretation.
+    life.save(ack_path, envelope)
+    assessment = acknowledgement(response, operation, bool(source))
+    envelope['assessment'] = assessment
     life.save(ack_path, envelope)
     if not assessment['lease_closed']:
         raise ValueError('service did not acknowledge closure; reconcile saved response')

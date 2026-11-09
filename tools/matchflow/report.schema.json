@@ -19,6 +19,7 @@
     "pack_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
     "checked_flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
     "baseline": {"$ref": "#/$defs/check"}, "final": {"$ref": "#/$defs/check"}, "latest_valid": {"$ref": "#/$defs/check"},
+    "retained_check": {"$ref": "#/$defs/check"},
     "service": {
       "type": "object", "required": ["submission_id", "checkpoint_id", "verdict", "acknowledgement_path", "source_retention"],
       "properties": {
