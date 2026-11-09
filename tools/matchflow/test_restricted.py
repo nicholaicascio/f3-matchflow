@@ -118,6 +118,122 @@ class BrokerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             broker.worker_call('ses_child2', 'read', dict(path='candidate.cpp'))
 
+    def test_schema_and_stage_enum_discovery(self):
+        schema = self.call('schema')
+        self.assertEqual(schema['input']['properties']['data']['properties']['stage']['enum'],
+                         ['baseline', 'attempt', 'final'])
+        self.assertIn('check_id', schema['operations']['diff']['required'])
+        with self.assertRaisesRegex(ValueError, 'baseline, attempt or final'):
+            self.call('check', source='x.cpp', stage='experiment', change='x', why='x', expect='x')
+
+    def test_help_delivered_on_tools_acknowledged_and_blocks_voluntary_close(self):
+        self.owned_fixture()
+        self.call('escalate', reason='Measured issue', need='A concrete answer')
+        response = batch.answer('test', 'worker01', 'Use the named member.')
+        value = self.call('list')
+        self.assertEqual(value['unread_parent_help'][0]['request_id'], response['request_id'])
+        with self.assertRaisesRegex(ValueError, 'unread parent help'):
+            life.begin_close(self.folder, 'worker01', require_help_read=True)
+        self.call('help_ack', request_ids=[response['request_id']])
+        self.assertEqual(life.unread_help(self.folder, 'worker01'), [])
+        life.begin_close(self.folder, 'worker01', require_help_read=True)
+
+    def test_forced_close_ignores_unread_help(self):
+        self.owned_fixture()
+        self.call('escalate', reason='Measured issue', need='Answer')
+        batch.answer('test', 'worker01', 'Read this.')
+        (self.folder/'STOP').touch()
+        life.begin_close(self.folder, 'worker01', require_help_read=True)
+
+    def test_answer_during_close_does_not_freeze_source_or_review(self):
+        self.owned_fixture()
+        self.call('escalate', reason='Measured issue', need='Answer')
+        self.call('write', path='a.cpp', text='void f() { return; }')
+        notes = dict(reason='No concrete next lead', category='other', tried='baseline',
+                     still_differs='register selection', suspected_cause='allocation')
+        answered = []
+        def api(tool, body):
+            if tool == 'status':
+                if not answered:
+                    answered.append(batch.answer('test', 'worker01', 'Try the named local.'))
+                return dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            raise AssertionError(tool)
+        with self.assertRaisesRegex(ValueError, 'unread parent help'):
+            broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='a.cpp', notes=notes), api=api)
+        self.assertFalse((self.folder/'worker01/closure-source.cpp').exists())
+        self.assertFalse((self.folder/'worker01/near-miss-review.json').exists())
+        self.assertEqual(life.snapshot(self.folder, 'worker01')['state'], 'claimed')
+        self.call('help_ack', request_ids=[answered[0]['request_id']])
+        self.call('write', path='b.cpp', text='void f() {}')
+        closed = broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='b.cpp', notes=notes), api=api)
+        self.assertTrue(closed['lease_closed'])
+        self.assertEqual((self.folder/'worker01/closure-source.cpp').read_text(), 'void f() {}')
+
+    def test_invalid_reports_never_complete_or_invent_submissions(self):
+        for worker, session in (('worker01', 'ses_child1'), ('worker02', 'ses_child2')):
+            state = life.blocked(self.folder, worker, 'fixture setup blocked')
+            life.save(self.folder/worker/'report.json', dict(address=state['address'], session_id=session,
+                       claim_id=None, outcome='submitted', retained_check=dict(ndiff_insn=0)))
+        result = batch.monitor('test')
+        self.assertNotIn('report_complete', [e['event'] for e in result['events']])
+        with self.assertRaisesRegex(ValueError, 'evidence invalid'):
+            batch.debrief('test')
+        # The experiment watchdog legitimately stops at claim closure; the parent
+        # monitor must keep waiting for notes/reports without a stale-health error.
+        with life.transaction(self.folder) as db:
+            control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+            control['heartbeat'] = -1000
+            db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(control),))
+        with patch.object(batch.time, 'sleep', side_effect=RuntimeError('still monitoring reports')):
+            with self.assertRaisesRegex(RuntimeError, 'still monitoring reports'):
+                batch.monitor('test')
+
+    def test_full_diff_captured_paginated_and_hash_checked(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() {}')
+        result = dict(status='wip', diffs=1, ndiff_insn=1, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        def runner(cmd, **kwargs):
+            output = cmd[cmd.index('--full-diff')+1]
+            # The production runner maps to WSL; this fixture uses native paths.
+            Path(output).write_text('\n'.join('line %s' % n for n in range(400)), encoding='utf-8')
+            return subprocess.CompletedProcess(cmd, 1, json.dumps(result), '')
+        with patch('matchflow.wsl_path', side_effect=str), patch.object(ledger.subprocess, 'run', side_effect=runner):
+            checked = self.call('check', source='candidate.cpp', stage='baseline', change='start', why='inspect', expect='diff')
+        page = self.call('diff', check_id=checked['check_id'], offset=301, limit=10)
+        self.assertTrue(page['available'])
+        self.assertIn('line 300', page['text'])
+        self.assertEqual(self.call('diff', check_id=checked['check_id'], limit=1500)['total_lines'], 400)
+        with self.assertRaises(ValueError):
+            broker.worker_call('ses_child2', 'diff', dict(check_id=checked['check_id']))
+        raw = life.load(checked['evidence'])
+        Path(raw['full_diff']['path']).write_text('tampered')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.call('diff', check_id=checked['check_id'])
+
+    def test_audit_assertions_reject_wrong_batch_claim_or_session(self):
+        self.owned_fixture()
+        status = self.root/'status.json'
+        life.save(status, dict(checked_at=life.stamp(), status=dict(open_claims=[])))
+        expected = dict(batch='other', workers=[dict(worker='worker01', address='0x00123456',
+                                                   claim_id='clm_fixture', session_id='ses_child1')])
+        with self.assertRaisesRegex(ValueError, 'expected batch'):
+            batch.audit('test', status, expected)
+        expected['batch'] = 'test'
+        expected['workers'][0]['session_id'] = 'ses_wrong'
+        with self.assertRaisesRegex(ValueError, 'exact assignment'):
+            batch.audit('test', status, expected)
+
+    def test_monitor_closed_is_not_report_complete(self):
+        self.owned_fixture()
+        life.begin_close(self.folder, 'worker01')
+        life.closed(self.folder, 'worker01', 'given_up', self.folder/'ack.json', 'retained')
+        result = batch.monitor('test')
+        self.assertEqual(result['state'], 'worker_milestones')
+        self.assertEqual([e['event'] for e in result['events']], ['claim_closed'])
+
     def test_unbound_session_and_changed_assignment_fail_closed(self):
         with self.assertRaisesRegex(ValueError, 'unbound'):
             broker.worker_call('ses_forged', 'status', {})
@@ -216,6 +332,17 @@ class BrokerTests(unittest.TestCase):
                     dict(open_claims=[], recent=[dict(id='sub_fixture', addr='0x00123456', verdict='verified')]), ledger.DEFAULT_DB)
         self.assertEqual(audit['evidence_errors'], [])
         self.assertEqual(audit['verification'], 'verified')
+        summary = batch.debrief('test')
+        self.assertEqual(summary['counts']['submitted'], 1)
+        self.assertEqual(summary['workers'][0]['verification'], 'unknown_without_fresh_status')
+        self.assertEqual(summary['workers'][0]['retained_check_id'], report['retained_check']['check_id'])
+        milestones = batch.monitor('test')['events']
+        self.assertEqual([m['event'] for m in milestones], ['claim_closed', 'notes_complete', 'report_complete'])
+        saved = life.load(self.folder/'worker01/report.json')
+        saved['claim_id'] = 'clm_wrong'
+        life.save(self.folder/'worker01/report.json', saved)
+        with self.assertRaisesRegex(ValueError, 'report evidence invalid'):
+            batch.debrief('test')
         with self.assertRaises(ValueError):
             self.call('write', path='candidate.cpp', text='changed')
 
@@ -323,8 +450,12 @@ class BrokerTests(unittest.TestCase):
             stdout = 'MATCH: written to /mnt/f/private/candidate.permuted.cpp'
             stderr = ''
             pid = 4243
+            stdout = 'SYNTHETIC_DISASSEMBLY_SECRET_SENTINEL\n' + 'Z' * 200000
+            stderr = 'SYNTHETIC_SECRET_SENTINEL'
             def __init__(self, cmd, **kwargs):
                 self.polls = 0
+                kwargs['stdout'].write(self.stdout.encode('utf-8'))
+                kwargs['stderr'].write(self.stderr.encode('utf-8'))
                 (outer.folder/'STOP').touch()
             def poll(self):
                 self.polls += 1
@@ -334,10 +465,11 @@ class BrokerTests(unittest.TestCase):
             def wait(self, timeout=None): return self.returncode
         with patch.object(ledger.subprocess, 'Popen', side_effect=Search), \
                 patch.object(ledger.subprocess, 'run') as verification:
-            with self.assertRaisesRegex(ValueError, 'stopped by STOP'):
-                self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
+            failed = self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
                           timeout_seconds=60, change='search', why='Near miss', expect='MATCH',
                           observed='two instructions differ')
+            self.assertFalse(failed['succeeded'])
+            self.assertEqual(failed['diagnostics']['disposition'], 'stopped')
             verification.assert_not_called()
         self.assertFalse(list((self.folder/'worker01/files').glob('permuted-*.cpp')))
         record = life.load(next((self.folder/'worker01/permute').rglob('run.json')))
@@ -359,6 +491,14 @@ class BrokerTests(unittest.TestCase):
         broker.worker_call('ses_child1', 'checkpoint', dict(phase='notes', note='Stopped search evidence retained.'), api=api)
         report = self.call('report')
         self.assertEqual(report['permute_runs'][0]['verification_disposition'], 'stopped')
+        self.assertNotIn('SYNTHETIC_', json.dumps(report))
+        self.assertNotIn('ZZZZZZ', json.dumps(report))
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            payloads = ''.join(r[0] for r in db.execute("SELECT payload FROM events WHERE kind='permute'"))
+            self.assertNotIn('SYNTHETIC_', payloads)
+            self.assertNotIn('ZZZZZZ', payloads)
+        raw = life.load(record['raw_path'])
+        self.assertIn('SYNTHETIC_', raw['stdout'])
         audited = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
                                                life.snapshot(self.folder, 'worker01'),
                                                dict(open_claims=[]), ledger.DEFAULT_DB)
@@ -382,6 +522,38 @@ class BrokerTests(unittest.TestCase):
                 self.call('permute', source='candidate.cpp', **data)
         with self.assertRaises(ValueError):
             self.call('permute', source='../assignment.json', trials=20, jobs=1, timeout_seconds=60)
+
+    def test_timeout_diagnostics_reach_worker_without_raw_output(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() {}')
+        result = dict(status='wip', diffs=2, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='near miss', hypothesis='search', expected='MATCH')
+        started = [False]
+        clock = ledger.time.monotonic
+        class Search:
+            returncode = 124
+            def __init__(self, cmd, **kwargs):
+                self.polls = 0
+                kwargs['stdout'].write(b'SECRET_SENTINEL\n')
+                started[0] = True
+            def poll(self):
+                self.polls += 1
+                return None if self.polls == 1 else 124
+            def wait(self, timeout=None):
+                return 124
+        with patch.object(ledger.time, 'monotonic', side_effect=lambda: clock() + (100 if started[0] else 0)), \
+                patch.object(ledger.subprocess, 'Popen', side_effect=Search):
+            failed = self.call('permute', source='candidate.cpp', stage='attempt', trials=20,
+                               jobs=1, timeout_seconds=60, why='search', expect='MATCH', observed='2 differ')
+        self.assertEqual(failed['verification_disposition'], 'timeout')
+        self.assertFalse(failed['succeeded'])
+        self.assertEqual(failed['diagnostics']['effective_timeout_seconds'], 60)
+        self.assertIn('run_id', failed)
+        self.assertIsNone(failed['output'])
+        self.assertNotIn('SECRET_SENTINEL', json.dumps(failed))
 
     def test_escalate_wakes_monitor_and_parent_answer_is_read(self):
         self.owned_fixture()
@@ -520,10 +692,11 @@ class BrokerTests(unittest.TestCase):
             def wait(self, timeout=None): return self.returncode
         with patch.object(ledger.subprocess, 'Popen', side_effect=Search), \
                 patch.object(ledger.subprocess, 'run') as verification:
-            with self.assertRaisesRegex(ValueError, 'termination could not be confirmed'):
-                self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
+            failed = self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
                           timeout_seconds=60, change='search', why='Near miss', expect='MATCH',
                           observed='two instructions differ')
+            self.assertFalse(failed['succeeded'])
+            self.assertEqual(failed['diagnostics']['disposition'], 'termination_unconfirmed')
             verification.assert_not_called()
         self.assertFalse(list((self.folder/'worker01/files').glob('permuted-*.cpp')))
         state = life.snapshot(self.folder, 'worker01')

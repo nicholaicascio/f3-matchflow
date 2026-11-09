@@ -428,6 +428,8 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
             if (value.get('outcome') != 'blocked' or value.get('address') != task['address'] or
                     value.get('claim_id') is not None or state['address'] != task['address']):
                 errors.append('blocked report differs from unclaimed assignment')
+            if value.get('session_id') != state.get('session_id') or value.get('model') != task['model'].split('#')[0]:
+                errors.append('blocked report session/model differs from assignment')
             if value.get('schema_version') == REPORT_VERSION:
                 assignment_value = life.load(worker / 'assignment.json')
                 target = assignment_value.get('target', {})
@@ -615,6 +617,18 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
         errors.append('report: ' + str(exc))
     return dict(lease_closure=lease, evidence_integrity='invalid' if errors else 'valid',
                 source_handoff=handoff, verification=verification, evidence_errors=errors)
+
+
+def local_completion(folder, task, state, db_path=None):
+    """Validate canonical local evidence without implying fresh remote verification."""
+    if state.get('state') != 'closed':
+        return dict(complete=False, errors=['claim not closed'])
+    try:
+        result = audit_worker(folder, task, state, dict(open_claims=[], recent=[]),
+                              db_path or ledger.DEFAULT_DB)
+        return dict(complete=result['evidence_integrity'] == 'valid', errors=result['evidence_errors'])
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+        return dict(complete=False, errors=['local evidence unavailable: '+str(exc)])
 
 
 def main():

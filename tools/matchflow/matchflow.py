@@ -304,6 +304,11 @@ def check(db, args):
     requested = flags(args.flags)
     from checker import command
     cmd = command(["--pack", wsl_path(pack_path), "--claim", args.claim, "--json"])
+    full_diff = None
+    if not getattr(args, 'import_evidence', None):
+        evidence.mkdir(parents=True, exist_ok=True)
+        full_diff = evidence / (args.claim + '_' + str(time.time_ns()) + '.diff.txt')
+        cmd += ['--full-diff', wsl_path(full_diff)]
     if requested:
         cmd += ["--flags", ",".join(requested)]
     for key in ("change", "observed", "why", "expect", "regions"):
@@ -314,11 +319,43 @@ def check(db, args):
             cmd += ["--" + key + '=' + value]
     cmd += [wsl_path(source)]
     imported = getattr(args, 'import_evidence', None)
+    invocation_evidence_path = None
     if imported:
         raw_import = load(imported)
-        if (raw_import.get('command') != cmd or raw_import.get('source_hash') != source_hash or
+        invocation_evidence_path = raw_import.get('invocation_evidence_path') or str(Path(imported).resolve())
+        imported_cmd = list(raw_import.get('command') or [])
+        compare_cmd = list(imported_cmd)
+        imported_diff = None
+        if '--full-diff' in compare_cmd:
+            # Only the canonical checker option position, after the trusted
+            # runner boundary and --json, may differ from legacy invocations.
+            index = cmd.index('--json') + 1
+            if compare_cmd.count('--full-diff') != 1 or compare_cmd[index:index+1] != ['--full-diff'] or index+1 >= len(compare_cmd):
+                raise ValueError('imported full-diff command provenance is not canonical')
+            name = compare_cmd[index+1].replace('\\', '/').rsplit('/', 1)[-1]
+            if not re.fullmatch(re.escape(args.claim) + r'_\d+\.diff\.txt', name):
+                raise ValueError('imported full-diff destination is not host-owned')
+            from security import scoped
+            # The command describes the ORIGINAL invocation. Captures can be
+            # relocated during an import without pretending another compile ran.
+            imported_diff = scoped(Path(invocation_evidence_path).resolve().parent, name)
+            if compare_cmd[index+1] != wsl_path(imported_diff):
+                raise ValueError('imported full-diff destination provenance mismatch')
+            del compare_cmd[index:index+2]
+        if (compare_cmd != cmd or raw_import.get('source_hash') != source_hash or
                 raw_import.get('pack_hash') != pack_hash or raw_import.get('unchanged') is not True):
             raise ValueError('imported command/source/pack provenance does not match this check')
+        cmd = imported_cmd
+        if raw_import.get('full_diff'):
+            full = raw_import['full_diff']
+            captured = scoped(Path(imported).resolve().parent, Path(full['path']).name, exists=True)
+            if (imported_diff is None or Path(full['path']) != captured or
+                    not re.fullmatch(re.escape(args.claim) + r'_\d+\.diff\.txt', captured.name) or
+                    digest(captured) != full['sha256']):
+                raise ValueError('imported full-diff evidence provenance mismatch')
+            evidence.mkdir(parents=True, exist_ok=True)
+            full_diff = evidence / (args.claim + '_' + str(time.time_ns()) + '.diff.txt')
+            full_diff.write_bytes(captured.read_bytes())
         elapsed = raw_import.get('seconds')
         if not isinstance(elapsed, (int, float)) or elapsed < 0:
             raise ValueError('imported evidence needs a measured nonnegative seconds field')
@@ -351,8 +388,11 @@ def check(db, args):
            "source_hash": source_hash, "pack_hash": pack_hash,
            "exit_code": run.returncode, "unchanged": unchanged, "seconds": elapsed,
            "captured_utc": now(), "imported_from": str(imported) if imported else None,
-           "source_snapshot_path": str(snapshot)}
+            "source_snapshot_path": str(snapshot)}
+    if full_diff is not None and full_diff.is_file():
+        raw['full_diff'] = dict(path=str(full_diff), sha256=digest(full_diff))
     evidence_path = evidence / f"{args.claim}_{time.time_ns()}.json"
+    raw['invocation_evidence_path'] = invocation_evidence_path or str(evidence_path.resolve())
     evidence_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     compact = {k: v for k, v in result.items() if k not in {"diff", "slots", "errors"}}
     compact["auto_repair"] = any("AUTO-REPAIR" in str(e) for e in result.get("errors", []) or [])
@@ -428,6 +468,13 @@ def _permute_score(stdout):
         return 0, True
     match = re.search(r"NO MATCH YET: best score (\d+)", stdout)
     return (int(match.group(1)), False) if match else (None, False)
+
+
+class PermutationFailure(ValueError):
+    """Failed search with safe structured diagnostics for the scoped tool."""
+    def __init__(self, message, summary):
+        super().__init__(message)
+        self.summary = dict(summary, succeeded=False, output=None, verification=None)
 
 
 def permute(db, args):
@@ -647,7 +694,17 @@ def permute(db, args):
                   verification_disposition=disposition,
                   score=score, matched=bool(matched), verification=verification,
                   verification_error=verification_error, raw_path=str(raw_path),
-                  raw_sha256=digest(raw_path))
+                   raw_sha256=digest(raw_path))
+    record['diagnostics'] = dict(
+        disposition=disposition, requested_timeout_seconds=options['timeout_seconds'],
+        effective_timeout_seconds=timeout, output_present=output.is_file(),
+        raw_evidence=dict(path=str(raw_path), sha256=digest(raw_path)),
+        progress_known=score is not None,
+        next_action=('Parent must confirm process-tree termination before further work.'
+                     if termination_unconfirmed else
+                     'No candidate published or verification started. Inspect saved progress/error tails; '
+                     'timeout does not prove all requested trials completed.' if timed_out else
+                     'Inspect verification disposition and official check before using output.'))
     lifecycle.save(record_path, record)
     record_sha256 = digest(record_path)
     summary = dict(run_id=run_id, record_path=str(record_path), record_sha256=record_sha256,
@@ -662,27 +719,28 @@ def permute(db, args):
                    raw_sha256=record["raw_sha256"],
                    verification_check_id=(verification or {}).get("check_id"),
                    verification_error=verification_error)
+    summary['diagnostics'] = record['diagnostics']
     with db:
         event(db, args.claim, "permute", summary)
     if termination_unconfirmed:
-        raise ValueError("permutation process termination could not be confirmed; cleanup required, "
-                         "evidence preserved")
+        raise PermutationFailure("permutation process termination could not be confirmed; cleanup required, "
+                                 "evidence preserved", summary)
     if stopped_mid:
-        raise ValueError("permutation search stopped by STOP/deadline/supervisor loss; "
-                         "evidence preserved, no candidate published")
+        raise PermutationFailure("permutation search stopped by STOP/deadline/supervisor loss; "
+                                 "evidence preserved, no candidate published", summary)
     if timed_out:
-        raise ValueError("official permuter exceeded its bounded wall clock (best score %s); "
-                         "evidence preserved, no verification" % score)
+        raise PermutationFailure("official permuter exceeded its bounded wall clock (best score %s); "
+                                 "evidence preserved, no verification" % score, summary)
     if returncode not in (0, 1) and not matched:
-        raise ValueError("official permuter failed; inspect retained host evidence, do not retry blindly")
+        raise PermutationFailure("official permuter failed; inspect retained host evidence, do not retry blindly", summary)
     if output_missing:
-        raise ValueError("official permuter produced no candidate; evidence preserved, do not retry blindly")
+        raise PermutationFailure("official permuter produced no candidate; evidence preserved, do not retry blindly", summary)
     if verification_error:
         stopping = any(token in verification_error for token in (
             'STOP', 'closure', 'experiment time', 'watchdog', 'active claim',
             'deadline has passed', 'cleanup barrier'))
         if not stopping:
-            raise ValueError('permutation verification failed: %s; evidence preserved' % verification_error)
+            raise PermutationFailure('permutation verification failed; inspect retained evidence', summary)
     return dict(**summary, output=str(usable) if usable else None, verification=verification)
 
 

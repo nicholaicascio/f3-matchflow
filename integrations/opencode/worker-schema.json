@@ -1,0 +1,58 @@
+{
+  "type": "object",
+  "properties": {
+    "op": {"type": "string", "enum": ["status", "schema", "help_ack", "symbols", "diff", "target", "read", "list", "search", "write", "reference", "twin", "check", "permute", "checks", "gate", "register_wall", "escalate", "promote", "checkpoint", "close", "report"]},
+    "data": {
+      "type": "object",
+      "properties": {
+        "source": {"type": "string", "description": "Own files-relative C++ path"},
+        "stage": {"type": "string", "enum": ["baseline", "attempt", "final"], "description": "check: baseline|attempt|final; permute: attempt|final (default attempt)"},
+        "area": {"type": "string", "enum": ["files", "pack", "packet"]},
+        "path": {"type": "string"},
+        "text": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+        "name": {"type": "string", "enum": ["policy", "recipe", "compiler_tips", "large_functions", "upstream_tips", "fnv"]},
+        "change": {"type": "string"},
+        "why": {"type": "string"},
+        "expect": {"type": "string"},
+        "observed": {"type": "string"},
+        "regions": {"type": "string"},
+        "flags": {"type": "string", "description": "Allowlisted complete comma-separated codegen flags"},
+        "trials": {"type": "integer", "minimum": 10, "maximum": 400},
+        "jobs": {"type": "integer", "minimum": 1, "maximum": 4},
+        "timeout_seconds": {"type": "integer", "minimum": 60, "maximum": 600},
+        "check_id": {"type": "integer", "minimum": 1},
+        "request_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "decision": {"type": "string", "enum": ["continue", "stop"]},
+        "reason": {"type": "string"},
+        "hypothesis": {"type": "string"},
+        "expected": {"type": "string"},
+        "integration_plan": {"type": "string"},
+        "evidence": {"type": "string"},
+        "need": {"type": "string"},
+        "phase": {"type": "string", "enum": ["plan", "draft_review", "notes"]},
+        "note": {"type": "string"},
+        "operation": {"type": "string", "enum": ["giveup", "submit", "flag-proof"]},
+        "no_source_reason": {"type": "string"},
+        "notes": {
+          "type": "object",
+          "properties": {
+            "reason": {"type": "string"},
+            "category": {"type": "string", "enum": ["pack_problem", "compiler_mismatch", "register_allocation", "instruction_order", "stack_layout", "eh", "unknown_type", "out_of_time", "other"]},
+            "tried": {"type": "string"},
+            "still_differs": {"type": "string"},
+            "suspected_cause": {"type": "string"},
+            "note": {"type": "string"},
+            "near_miss_review": {"type": "object", "properties": {"best_check_id": {"type": "integer", "minimum": 1}, "tested": {"type": "string"}, "untried": {"type": "string"}, "stop_reason": {"type": "string"}}, "required": ["best_check_id", "tested", "untried", "stop_reason"], "additionalProperties": false}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "description": "Operation requirements are also returned by schema and validated by the host. diff: check_id, offset=1, limit<=2000. symbols: text 2..160 chars, limit<=100. help_ack: request_ids. check: source, stage, change/why/expect and observed after first check. permute: source, stage attempt|final. close: operation plus source OR check_id OR no_source_reason for giveup; structured notes. All source and path values are relative and own-scoped."
+    }
+  },
+  "required": ["op"],
+  "additionalProperties": false
+}

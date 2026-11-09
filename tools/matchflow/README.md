@@ -175,6 +175,45 @@ or full-unit compatibility.
 
 ## Closure, failure and audit
 
+### Scoped observability and identity-safe audits
+
+`schema` returns the published input schema and per-operation requirements. The plugin
+publishes enums and fields from `integrations/opencode/worker-schema.json`. Check stages
+are `baseline|attempt|final`; permute stages are `attempt|final` (default `attempt`).
+
+Every new ordinary check captures the official `--full-diff` in private host evidence.
+`diff(check_id,offset,limit)` paginates that hash-checked output for an own check only,
+including after STOP, without compiling or restoring a candidate. Older checks explicitly
+report unavailable rather than fabricate a full diff. `symbols(text,limit)` is a bounded
+literal lookup of official symbol names/addresses (2..160 chars, at most 100 results),
+not game bytes, sibling inspection or a worker-supplied file path.
+
+Parent answers are attached to every successful worker tool response as
+`unread_parent_help`. Workers acknowledge the specific answer IDs with `help_ack`.
+Voluntary closure is blocked while an answer is unread, including an atomic recheck at
+closure reservation. STOP/deadline/supervisor loss closure never waits for acknowledgement.
+
+The monitor separately emits durable, deduplicated `claim_closed`, `notes_complete` and
+`report_complete` milestones. Only `all_complete` means every report and acknowledged
+closing note exists. Re-arm after intermediate events. It automatically saves a compact
+private `debrief.json`; its verification is unknown until supplied fresh official status.
+
+Use the identity-asserting audit helper for a finished-worker notification:
+
+```text
+python tools/matchflow/batch.py audit-worker BATCH --status PRIVATE_STATUS.json --worker worker01 --address ACTUAL_ADDRESS --claim-id ACTUAL_CLAIM --session-id ACTUAL_SESSION
+python tools/matchflow/batch.py debrief BATCH --status PRIVATE_STATUS.json
+```
+
+Whole-batch `audit --expect PRIVATE_IDENTITIES.json` also accepts a reviewed
+`{"batch":"BATCH","workers":[{"worker":"worker01","address":"ACTUAL_ADDRESS","claim_id":"ACTUAL_CLAIM","session_id":"ACTUAL_SESSION"}]}`.
+Wrong batch/address/claim/session assertions fail before audit conclusions are returned.
+Permuter run records now include effective/requested timeouts, output presence, progress
+availability, private raw-evidence references and next-action diagnostics. Raw stdout/stderr
+stays in private evidence, not ledger summaries or reports. Failed searches return structured
+diagnostics to the scoped worker. A timeout never
+implies that every requested trial ran and never publishes an unverified candidate.
+
 ```text
 python tools/matchflow/batch.py audit BATCH --status PRIVATE_STATUS_AFTER.json
 python tools/matchflow/service.py reconcile PRIVATE_BATCH_FOLDER worker01

@@ -85,6 +85,10 @@ def main():
                       F3CHECK_INDEX=config['index'], F3CHECK_SYMBOLS=config['symbols'],
                       F3CHECK_IMAGE=config['image'], F3_SITE='https://f3decomp.com')
     sys.path.insert(0, str(checker.parent))
+    if len(remaining) == 2 and remaining[0] == '--symbols-json':
+        from symbol_lookup import lookup
+        print(json.dumps(lookup(config['symbols'], **json.loads(remaining[1]))))
+        return 0
     if len(remaining) == 2 and remaining[0] == '--target-json':
         from target import inspect
         request = json.loads(remaining[1])

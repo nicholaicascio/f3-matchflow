@@ -26,6 +26,15 @@ If the twin is unrelated, use faithful pack siblings or reconstruct from the tar
 - x87 ordering: use official compiler tips; FO3 Havok FPU differs from FNV SSE.
 - Suspected flags: a plausible prologue is not proof. Only an exact diagnostic MATCH plus
   source-bearing checkpoint can support the compile-flags report route.
+- Thread-local access (`SECREL target outside the image`): the displacement is the `.tls`
+  offset, so the candidate must name a TLS variable that already has a canonical binding in
+  `f3decomp_symbols.json`. Declaring or defining your own `__declspec(thread)` variable is
+  the usual mistake: an unbound extern resolves to `0 + addend`, outside every section, and
+  a local definition gets a `.tls` offset the original image does not have. In Fallout 3
+  1.7.0.3 `.tls` is VA `0x0117c000` (size `0x2a9`), so a target displacement of `0x298` is
+  `?g_tls_2b4@@3HA` or `?g_tlsMemContext@@3HA`; the declared type must match exactly or the
+  decorated name will not bind. A matched sibling body kept only as compilation context is
+  not evidence: only the assigned function's relocations are validated.
 
 ## Last mile
 

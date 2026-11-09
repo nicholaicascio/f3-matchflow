@@ -182,10 +182,38 @@ def monitor(name):
                 raise ValueError('dispatch before monitoring')
             control = json.loads(row['payload'])
             states = [lifecycle.read_worker(db, task['id']) for task in tasks]
-        if all(s['state'] == 'closed' for s in states):
-            return dict(state='all_closed', note='Audit acknowledgements/evidence against fresh official status.')
+        milestones = []
+        from service import closing_notes_record
+        from evidence import local_completion
+        for task, state in zip(tasks, states):
+            if state['state'] != 'closed':
+                continue
+            milestones.append(dict(worker=task['id'], event='claim_closed', claim_id=state.get('claim_id'),
+                                   session_id=state.get('session_id')))
+            try:
+                notes_done = closing_notes_record(path, task['id'], state)['status'] in ('acknowledged', 'not_applicable')
+            except (ValueError, OSError):
+                notes_done = False
+            if notes_done:
+                milestones.append(dict(worker=task['id'], event='notes_complete', claim_id=state.get('claim_id'),
+                                       session_id=state.get('session_id')))
+            if notes_done and local_completion(path, task, state)['complete']:
+                milestones.append(dict(worker=task['id'], event='report_complete', claim_id=state.get('claim_id'),
+                                       session_id=state.get('session_id')))
+        if sum(m['event'] == 'report_complete' for m in milestones) == len(tasks):
+            summary = debrief(name)
+            return dict(state='all_complete', debrief=summary,
+                        note='Claims, notes and reports complete; audit against fresh official status.')
+        with lifecycle.transaction(path) as db:
+            current = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+            seen = current.setdefault('monitor_seen_milestones', [])
+            new = [m for m in milestones if m not in seen]
+            if new:
+                seen.extend(new)
+                db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(current),))
+                return dict(state='worker_milestones', events=new, note='Re-arm monitor until all_complete; closure alone is not report completion.')
         heartbeat = control.get('heartbeat')
-        if heartbeat is None or not 0 <= time.monotonic()-heartbeat <= 30:
+        if any(s['state'] != 'closed' for s in states) and (heartbeat is None or not 0 <= time.monotonic()-heartbeat <= 30):
             return dict(state='supervisor_lost', cleanup_required=True, note='Closure only; reconcile owned sessions/claims.')
         due = [dict(worker=t['id'], claim_id=s['claim_id'], session_id=s['session_id'], phase=lifecycle.phase(s))
                 for t, s in zip(tasks, states) if s['state'] != 'closed' and
@@ -260,14 +288,26 @@ def headless(name, status_path, jobs):
     raise ValueError('legacy headless workers disabled; use matchflow_launch restricted subagents')
 
 
-def audit(name, status_path):
+def audit(name, status_path, expected=None):
     path = batch_path(name)
     snapshot = load(status_path)
     fresh(snapshot['checked_at'])
     status = snapshot['status']
     opened = {r['claim_id'] for r in status['open_claims']}
     rows = []
-    for task in load(path/'batch.json')['tasks']:
+    manifest = load(path/'batch.json')
+    if manifest.get('batch') != name:
+        raise ValueError('batch identity mismatch')
+    if expected is not None:
+        if expected.get('batch') != name or not expected.get('workers'):
+            raise ValueError('expected batch and worker identities required')
+        for item in expected['workers']:
+            state = lifecycle.snapshot(path, item['worker'])
+            task = next((t for t in manifest['tasks'] if t['id'] == item['worker']), None)
+            if not task or any(not item.get(k) or state.get(k) != item[k]
+                               for k in ('address', 'claim_id', 'session_id')) or task['address'] != item['address']:
+                raise ValueError('expected address/claim/session does not match exact assignment')
+    for task in manifest['tasks']:
         worker = path/task['id']
         ownership = (lifecycle.snapshot(path, task['id']) if (path/'lifecycle.sqlite3').exists() else
                      load(worker/'ownership.json') if (worker/'ownership.json').exists() else {})
@@ -286,9 +326,57 @@ def audit(name, status_path):
                          report_present=report,
                           note='Remote absence proves no open lease, not a MATCH or submission acknowledgement',
                           **detail))
-    return dict(ok=all(not r['cleanup_required'] and r['evidence_integrity'] == 'valid' for r in rows),
-                workers=rows, unrelated_open_claims=sorted(opened-{r['claim_id'] for r in rows if r['claim_id']}),
+    batch_claims = {r['claim_id'] for r in rows if r['claim_id']}
+    if expected is not None:
+        selected = {w['worker'] for w in expected['workers']}
+        rows = [r for r in rows if r['worker'] in selected]
+    return dict(batch=name, ok=all(not r['cleanup_required'] and r['evidence_integrity'] == 'valid' for r in rows),
+                workers=rows, unrelated_open_claims=sorted(opened-batch_claims),
                 note='Never release unrelated claims; inspect missing ownership and verify checker/ack evidence separately')
+
+
+def debrief(name, status_path=None):
+    """Compact local evidence summary. Never claims, checks or polls the service."""
+    path = batch_path(name)
+    manifest = load(path/'batch.json')
+    if manifest.get('batch') != name:
+        raise ValueError('batch identity mismatch')
+    audited = audit(name, status_path) if status_path else None
+    verified = {r['worker']: r['verification'] for r in audited['workers']} if audited else {}
+    rows = []
+    for task in manifest['tasks']:
+        state = lifecycle.snapshot(path, task['id'])
+        report_path = path/task['id']/'report.json'
+        report = load(report_path) if report_path.is_file() else {}
+        from evidence import local_completion
+        integrity = local_completion(path, task, state)
+        if report and not integrity['complete']:
+            raise ValueError('report evidence invalid; audit before debrief: ' + '; '.join(integrity['errors']))
+        if report and (report.get('claim_id') != state.get('claim_id') or
+                       report.get('address') != task['address'] or report.get('session_id') != state.get('session_id')):
+            raise ValueError('report identity mismatch; audit before debrief')
+        retained = report.get('retained_check') or {}
+        rows.append(dict(worker=task['id'], address=task['address'], claim_id=state.get('claim_id'),
+                         session_id=state.get('session_id'), model=task['model'],
+                         outcome=report.get('outcome', state.get('outcome')), report_complete=integrity['complete'],
+                         verification=verified.get(task['id'], 'unknown_without_fresh_status'),
+                         retained_check_id=retained.get('check_id'), ndiff_insn=retained.get('ndiff_insn'),
+                         extent=retained.get('extent'), diagnostic=retained.get('diagnostic'),
+                         near_miss=(report.get('near_miss') or {}).get('status'),
+                         measured_near_miss=isinstance(retained.get('ndiff_insn'), int) and
+                                            0 < retained['ndiff_insn'] <= 40 and retained.get('valid') is True,
+                         permuter_runs=len(report.get('permute_runs') or [])))
+    result = dict(batch=name, generated_utc=now(), workers=rows,
+                  counts=dict(assignments=len(rows), reports_complete=sum(r['report_complete'] for r in rows),
+                              submitted=sum(r['outcome'] == 'submitted' for r in rows),
+                              given_up=sum(r['outcome'] == 'given_up' for r in rows),
+                              verified=sum(r['verification'] == 'verified' for r in rows),
+                              near_misses=sum(r['near_miss'] == 'accepted' for r in rows),
+                              measured_near_misses=sum(r['measured_near_miss'] for r in rows)),
+                  audit_ok=audited['ok'] if audited else None,
+                  usage_note='Raw input, output, reasoning and cache counters are not assumed additive; billing unknown.')
+    save(path/'debrief.json', result)
+    return result
 
 
 def recover(name, actions_path=None, apply=False, api=None):
@@ -312,6 +400,11 @@ def main():
     p = sub.add_parser('prepare'); p.add_argument('batch'); p.add_argument('--selection', required=True); p.add_argument('--model', default=DEFAULT_MODEL)
     p = sub.add_parser('headless'); p.add_argument('batch'); p.add_argument('--status', required=True); p.add_argument('--jobs', type=int, required=True)
     p = sub.add_parser('audit'); p.add_argument('batch'); p.add_argument('--status', required=True)
+    p.add_argument('--expect', help='Reviewed JSON with batch and exact worker/address/claim_id/session_id identities')
+    p = sub.add_parser('audit-worker'); p.add_argument('batch'); p.add_argument('--status', required=True)
+    for key in ('worker', 'address', 'claim-id', 'session-id'):
+        p.add_argument('--'+key, required=True)
+    p = sub.add_parser('debrief'); p.add_argument('batch'); p.add_argument('--status')
     p = sub.add_parser('dispatch'); p.add_argument('batch'); p.add_argument('--method', choices=['workflow', 'subagents'], required=True); p.add_argument('--status', required=True)
     p = sub.add_parser('monitor'); p.add_argument('batch')
     p = sub.add_parser('help'); p.add_argument('batch'); p.add_argument('--worker')
@@ -334,8 +427,13 @@ def main():
             print(json.dumps(answer(args.batch, args.worker, args.text, args.request_id), indent=2))
         elif args.command == 'recover':
             print(json.dumps(recover(args.batch, args.actions, args.apply), indent=2))
+        elif args.command == 'debrief':
+            print(json.dumps(debrief(args.batch, args.status), indent=2))
         else:
-            result = audit(args.batch, args.status)
+            expected = (dict(batch=args.batch, workers=[dict(worker=args.worker, address=args.address,
+                        claim_id=args.claim_id, session_id=args.session_id)]) if args.command == 'audit-worker'
+                        else load(args.expect) if args.expect else None)
+            result = audit(args.batch, args.status, expected)
             print(json.dumps(result, indent=2))
             if not result['ok']:
                 parser.exit(2, 'Audit requires reconciliation or evidence repair.\n')

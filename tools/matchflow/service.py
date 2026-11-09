@@ -315,6 +315,8 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
     folder = Path(folder)
     state = life.snapshot(folder, worker)
     cid = state['claim_id']
+    if origin == 'worker' and life.voluntary_experiment(folder, worker, state) and life.unread_help(folder, worker):
+        raise ValueError('unread parent help: read status.help then help_ack before voluntary closure')
     owned(api('status', {}), cid, state['address'])
     assignment = life.load(folder / worker / 'assignment.json')
     body = dict(claim_id=cid, model=assignment['claim_body']['model'])
@@ -363,14 +365,15 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
         if frozen.exists():
             if frozen.read_bytes() != data:
                 raise ValueError('refusing to overwrite a different frozen closure source')
-        else:
+    # Reject unread answers before creating immutable artifacts. Once reserved,
+    # failures leave close_pending for host reconciliation, never new experiments.
+    life.begin_close(folder, worker, require_help_read=origin == 'worker')
+    if source:
+        if not frozen.exists():
             with frozen.open('xb') as output:
                 output.write(data)
     if near_record is not None:
         _record_near_miss(folder, worker, cid, near_record, db_path)
-    # Reserve once, after local validation/freezing but before network mutation.
-    # Failed transport leaves close_pending for read-only reconciliation.
-    life.begin_close(folder, worker)
     checkpoint_id = None
     if operation == 'flag-proof':
         checkpoint = dict(claim_id=cid, request_id='flag-proof-' + life.uuid.uuid4().hex,

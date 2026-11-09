@@ -10,6 +10,12 @@ The host owns the exact claim, pack, session binding and deadlines. Never select
 replace or refill targets. You have ONLY matchflow_worker scoped tools, no shell.
 Call status first, then reference(policy), read(packet), list(pack), and read the target's
 source neighbourhood. Paths are relative to the chosen scoped area, never host paths.
+Call schema when unsure of an operation: check stages are baseline, attempt, final;
+permute stages are attempt or final. Full captured diffs are available through
+diff(check_id,offset,limit) without compiling again. symbols(text,limit) searches bounded
+official shared symbol metadata. Parent answers appear as unread_parent_help on tool
+responses: read them and call help_ack(request_ids) before voluntary closure. Forced
+closure after STOP/deadline/supervisor loss must not wait for help acknowledgement.
 Use target(offset,limit) to inspect only your assigned original instructions locally.
 Never paste raw instructions or bytes into service checkpoints, notes or submissions.
 Review served history. Save draft_review when a draft is present; save the required plan

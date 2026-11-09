@@ -17,6 +17,11 @@ test('installed SDK registers scoped-only tools and strips broad tools from work
   const schema=tools.get('matchflow_worker').input;
   assert.equal(schema.additionalProperties,false);
   assert.deepEqual(Object.keys(schema.properties),['op','data']);
+  assert.deepEqual(schema.properties.data.properties.stage.enum,['baseline','attempt','final']);
+  assert.ok(schema.properties.op.enum.includes('diff'));
+  assert.ok(schema.properties.op.enum.includes('help_ack'));
+  assert.ok(schema.properties.op.enum.includes('symbols'));
+  assert.equal(schema.properties.data.properties.notes.type,'object');
   assert.deepEqual([...hooks.keys()],['context','generate','compaction']);
   for(const hook of hooks.values()){
     const event={sessionID:'ses_real',agent:'match-worker',model:{providerID:'p',id:'m'},tools:{shell:{},read:{},execute:{},subagent:{},f3decomp_claim:{},matchflow_launch:{},matchflow_worker:{}}};

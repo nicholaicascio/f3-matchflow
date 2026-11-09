@@ -133,6 +133,30 @@ def answer_escalation(folder, worker, text, request_id=None):
     return response
 
 
+def unread_help(folder, worker):
+    with transaction(folder) as db:
+        state = read_worker(db, worker)
+        seen = state.get('help_acknowledged', [])
+        rows = db.execute('SELECT payload FROM escalation_answers WHERE worker=? ORDER BY seq',
+                          (worker,)).fetchall()
+        return [json.loads(r['payload']) for r in rows
+                if json.loads(r['payload'])['request_id'] not in seen]
+
+
+def acknowledge_help(folder, worker, request_ids):
+    if not isinstance(request_ids, list) or not request_ids or not all(isinstance(x, str) for x in request_ids):
+        raise ValueError('request_ids must name the answers you read')
+    with transaction(folder) as db:
+        state = read_worker(db, worker)
+        known = {r['request_id'] for r in db.execute(
+            'SELECT request_id FROM escalation_answers WHERE worker=?', (worker,))}
+        if not set(request_ids) <= known:
+            raise ValueError('unknown help answer for this worker')
+        state['help_acknowledged'] = sorted(set(state.get('help_acknowledged', [])) | set(request_ids))
+        write_worker(db, worker, state)
+    return dict(acknowledged=request_ids)
+
+
 def dispatch(folder, method):
     folder = Path(folder)
     if method not in ('workflow', 'subagents', 'headless'):
@@ -356,11 +380,23 @@ def claimed(folder, worker, claim, address, deadline):
     return state
 
 
-def begin_close(folder, worker):
+def begin_close(folder, worker, require_help_read=False):
     with transaction(folder) as db:
         state = read_worker(db, worker)
         if state['state'] != 'claimed' or not state['claim_id']:
             raise ValueError('claim not owned or closure already attempted; reconcile without retry')
+        control_row = db.execute('SELECT payload FROM control WHERE id=1').fetchone()
+        control = json.loads(control_row['payload']) if control_row else {}
+        voluntary = (phase(state) == 'experiment' and not state.get('closure_requested') and
+                     not control.get('cleanup_barrier') and control.get('heartbeat') is not None and
+                     0 <= time.monotonic() - control['heartbeat'] <= 30 and
+                     not (Path(folder)/'STOP').exists() and
+                     not (Path(folder)/worker/'CLOSE_REQUESTED.json').exists())
+        if require_help_read and voluntary:
+            seen = set(state.get('help_acknowledged', []))
+            answers = db.execute('SELECT request_id FROM escalation_answers WHERE worker=?', (worker,)).fetchall()
+            if any(r['request_id'] not in seen for r in answers):
+                raise ValueError('unread parent help: read status.help then help_ack before voluntary closure')
         state['state'] = 'close_pending'
         write_worker(db, worker, state)
     return state

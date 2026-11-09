@@ -268,6 +268,39 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'provenance'):
             m.check(self.db, args)
 
+    def test_import_rejects_moved_or_external_full_diff_and_preserves_valid_capture(self):
+        self.register()
+        original = self.check()
+        raw = m.load(original['evidence'])
+        command = raw['command']
+        index = command.index('--full-diff')
+        pair = command[index:index+2]
+        args = argparse.Namespace(claim=self.claim, stage='baseline', source=str(self.source), flags=None,
+                                  evidence_dir=str(self.root/'imported'), import_evidence=original['evidence'])
+        raw['command'] = pair + command[:index] + command[index+2:]
+        Path(original['evidence']).write_text(json.dumps(raw))
+        with self.assertRaisesRegex(ValueError, 'canonical'):
+            m.check(self.db, args)
+        raw['command'] = command
+        full = Path(original['evidence']).parent/Path(pair[1]).name
+        # Native Windows paths and WSL paths share the host-selected filename.
+        full = full.parent/pair[1].replace('\\', '/').rsplit('/', 1)[-1]
+        full.write_text('complete official diff\n', encoding='utf-8')
+        raw['full_diff'] = dict(path=str(full), sha256=m.digest(full))
+        Path(original['evidence']).write_text(json.dumps(raw))
+        checked = m.check(self.db, args)
+        captured = m.load(checked['evidence'])['full_diff']
+        self.assertEqual(Path(captured['path']).parent, self.root/'imported')
+        self.assertEqual(captured['sha256'], m.digest(full))
+        args.import_evidence = checked['evidence']
+        args.evidence_dir = str(self.root/'imported-again')
+        chained = m.check(self.db, args)
+        chained_raw = m.load(chained['evidence'])
+        self.assertEqual(chained_raw['command'], command)
+        self.assertEqual(chained_raw['invocation_evidence_path'], raw['invocation_evidence_path'])
+        self.assertEqual(Path(chained_raw['full_diff']['path']).parent, self.root/'imported-again')
+        self.assertEqual(chained_raw['full_diff']['sha256'], m.digest(full))
+
 
 if __name__ == "__main__":
     unittest.main()

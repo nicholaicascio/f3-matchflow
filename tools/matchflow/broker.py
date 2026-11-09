@@ -205,7 +205,7 @@ def area_root(area, folder, worker, files, state):
 
 
 def read_text(path, offset=1, limit=200):
-    if type(offset) is not int or offset < 1 or type(limit) is not int or not 1 <= limit <= 1000:
+    if type(offset) is not int or offset < 1 or type(limit) is not int or not 1 <= limit <= 2000:
         raise ValueError('offset/limit outside allowed range')
     if path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError('file too large; use a narrower artifact')
@@ -215,10 +215,42 @@ def read_text(path, offset=1, limit=200):
 
 
 def worker_call(session, op, data, api=service.request):
+    result = _worker_call(session, op, data, api=api)
+    # Deliver answered escalations on every successful tool response, not just status.
+    # Explicit acknowledgement is separate from delivery and prevents silent closure.
+    row, _, _, folder, worker, _ = context(session)
+    unread = life.unread_help(folder, worker)
+    if unread and isinstance(result, dict):
+        result = dict(result, unread_parent_help=unread,
+                      help_action='Read these answers and call help_ack(request_ids) before voluntary closure.')
+    return result
+
+
+def _worker_call(session, op, data, api=service.request):
     row, assignment, state, folder, worker, files = context(session)
     if not isinstance(data, dict) or len(json.dumps(data)) > MAX_TEXT:
         raise ValueError('tool input must be a small object')
+    from worker_contract import validate
+    validate(op, data)
     cid = state.get('claim_id')
+    if op == 'help_ack':
+        return life.acknowledge_help(folder, worker, data.get('request_ids'))
+    if op == 'schema':
+        from worker_contract import describe
+        return describe(json.loads((REPOSITORY/'integrations/opencode/worker-schema.json').read_text(encoding='utf-8')))
+    if op == 'symbols':
+        from checker import command
+        import subprocess
+        from symbol_lookup import lookup
+        # Validate before entering WSL. No worker paths or addresses select an image.
+        text, limit = data.get('text'), data.get('limit', 25)
+        if not isinstance(text, str) or not 2 <= len(text) <= 160 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('symbols requires literal text (2..160 chars), limit 1..100')
+        process = subprocess.run(command(['--symbols-json', json.dumps(dict(text=text, limit=limit))]),
+                                 capture_output=True, text=True, timeout=30)
+        if process.returncode:
+            raise ValueError('official symbol metadata lookup unavailable')
+        return json.loads(process.stdout)
     if op == 'status':
         value = life.escalations(folder, worker)
         help_value = dict(
@@ -241,9 +273,12 @@ def worker_call(session, op, data, api=service.request):
             notes_complete = state['state'] == 'closed' and service.closing_notes_record(folder, worker, state)['status'] in ('acknowledged', 'not_applicable')
         except ValueError:
             notes_complete = False
+        task = next(t for t in life.load(folder/'batch.json')['tasks'] if t['id'] == worker)
+        report_complete = evidence.local_completion(folder, task, state)['complete']
         return dict(worker=worker, address=state['address'], session_id=session, claim_id=cid,
                     state=state['state'], outcome=state.get('outcome'),
-                    cleanup_required=state['state'] != 'closed' or not notes_complete, closing_notes_complete=notes_complete,
+                    cleanup_required=state['state'] != 'closed' or not notes_complete or not report_complete,
+                    closing_notes_complete=notes_complete, report_complete=report_complete,
                     report_path=str(folder/worker/'report.json'))
     if op == 'read':
         if data.get('area') == 'packet':
@@ -329,6 +364,23 @@ def worker_call(session, op, data, api=service.request):
         return dict(path=data['path'], sha256=ledger.digest(path))
     if not cid:
         raise ValueError('host has not registered an owned claim')
+    if op == 'diff':
+        check_id = data.get('check_id')
+        if type(check_id) is not int or check_id < 1:
+            raise ValueError('own positive check_id required')
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            checked = db.execute('SELECT evidence_path FROM checks WHERE id=? AND claim_id=?', (check_id, cid)).fetchone()
+        if not checked:
+            raise ValueError('unknown own check')
+        raw = life.load(checked['evidence_path'])
+        full = raw.get('full_diff')
+        if not full:
+            return dict(available=False, reason='Historical check has no captured full diff; no compilation performed.')
+        root = Path(checked['evidence_path']).parent
+        path = scoped(root, Path(full['path']).relative_to(root).as_posix(), exists=True)
+        if ledger.digest(path) != full['sha256']:
+            raise ValueError('full diff evidence hash mismatch')
+        return dict(available=True, **read_text(path, data.get('offset', 1), data.get('limit', 200)))
     if op == 'check':
         source = scoped(files, data['source'], exists=True)
         if source.suffix.lower() != '.cpp':
@@ -359,7 +411,10 @@ def worker_call(session, op, data, api=service.request):
                                   timeout_seconds=data.get('timeout_seconds', 240),
                                   **{k: data.get(k) for k in ('change', 'observed', 'why', 'expect', 'regions')})
         with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
-            result = ledger.permute(db, args)
+            try:
+                result = ledger.permute(db, args)
+            except ledger.PermutationFailure as exc:
+                return dict(exc.summary, error=str(exc))
         return result
     if op == 'gate':
         life.require_experiment(folder, worker)

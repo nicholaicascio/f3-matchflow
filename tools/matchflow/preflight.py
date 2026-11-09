@@ -16,7 +16,8 @@ def fingerprint():
     inputs = dict(workspace=str(workspace_root()), toolchain=runtime(), key_file=str(key_file()),
                   sources={p.name: digest(p) for p in sorted((REPOSITORY/'tools/matchflow').glob('*.py'))},
                   wrapper=digest(REPOSITORY/'tools/matchflow/check.sh'),
-                  plugin={p.name: digest(p) for p in sorted((REPOSITORY/'integrations/opencode').glob('*.mjs'))},
+                   plugin={p.name: digest(p) for p in sorted((REPOSITORY/'integrations/opencode').glob('*.mjs'))},
+                   worker_schema=digest(REPOSITORY/'integrations/opencode/worker-schema.json'),
                   policy=digest(REPOSITORY/'docs/matching-policy.md'),
                   prompt=digest(REPOSITORY/'tools/matchflow/prompts/worker.txt'),
                   agent=digest(REPOSITORY/'.opencode/agents/match-worker.md'))
