@@ -81,6 +81,15 @@ notifications used by the runbook; another host needs equivalent reliable monito
 - [Contributing and offline testing](CONTRIBUTING.md)
 - [Pinned optional dependencies](third_party/README.md)
 
+## Acknowledgements
+
+Optional cross-game matching assistance uses [f3twins](https://github.com/mathisto/f3twins)
+by [mathisto](https://github.com/mathisto), licensed under MIT. Thank you for the upstream
+tooling, seeds and matching guidance. Our adapter installs a pinned, hash-verified copy
+with its original license; f3twins is not required for ordinary matching. See
+[dependency details](third_party/README.md) and the
+[optional twins setup](tools/matchflow/README.md#optional-twins).
+
 ## License
 
 Original tooling and documentation are [MIT licensed](LICENSE). Separately installed
