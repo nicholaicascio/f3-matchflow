@@ -65,9 +65,10 @@ def screen(output, count=8, max_size=1023, max_pages=2, api=request):
         if not cursor or cursor in seen_cursors:
             break
         seen_cursors.add(cursor)
-    # File reports affect review/lane, not whether the address can be inspected.
+    # Keep the screen independent of draft existence and sibling-report counts:
+    # both are review evidence, never a selection preference or ranking score.
     ranked = sorted(candidates.values(), key=lambda f: (f.get('give_ups', 10**9),
-                    f.get('file_problem_reports', 10**9), f['size'], f['address']))
+                    f['size'], f['address']))
     shortlist = []
     # Only inspect the final bounded shortlist. A raced target is not replaced here.
     for i, candidate in enumerate(ranked[:count], 1):
@@ -78,9 +79,11 @@ def screen(output, count=8, max_size=1023, max_pages=2, api=request):
             continue
         shortlist.append(dict(metadata=info, local_history=local_history(output.parent/'ledger.sqlite3', info['address']),
                               history_reviewed=False, verdict_history='unknown',
+                              report_scope='unknown', report_evidence=None,
                               review_required=['Review substantive history and local verdicts',
-                                               'Review file reports; do not assume file-wide defect',
-                                               'Choose lane and evidence-backed hypothesis if research']))
+                                               'Determine report scope: function, sibling-only, unit-wide or unknown',
+                                               'A saved draft or sibling report is not a selection preference',
+                                               'Write next_experiment only where the facts justify it']))
     result = dict(schema_version=1, checked_at=life.stamp(), shortlist=shortlist,
                   requested=count, complete=len(shortlist) == count, review_required=True,
                   notices=(start.get('notices') or []) + (status.get('notices') or []),

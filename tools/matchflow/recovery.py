@@ -39,10 +39,12 @@ def inventory(folder, status, db_path=ledger.DEFAULT_DB):
         except ValueError:
             notes = dict(status='missing_or_unresolved')
         ack = folder/worker/'service-ack.json'
+        near = folder/worker/'near-miss-review.json'
         workers.append(dict(worker=worker, address=state['address'], session_id=state['session_id'], claim_id=cid,
                             state=state['state'], outcome=state.get('outcome'),
                             session_finished=bool(state.get('session_finished_utc') or (folder/worker/'usage-raw.json').exists()),
                             lease=opened.get(cid), acknowledgement_present=ack.is_file(), closing_notes=notes,
+                            near_miss=life.load(near) if near.is_file() else None,
                             checks=checks, review_required=state['state'] != 'closed' or notes['status'] == 'missing_or_unresolved'))
     return dict(workers=workers, unrelated_open_claims=sorted(set(opened)-{w['claim_id'] for w in workers}),
                 note='Inventory only. Review exact identities, checked source, structured giveup notes and closing note. '
@@ -134,7 +136,8 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
                 if ledger.digest(source) != action['source_sha256']:
                     raise ValueError('reviewed source changed before recovery; do not close')
             service.close(folder, worker, 'giveup', source=source, notes=action['notes'],
-                          no_source_reason=action.get('no_source_reason'), db_path=db_path, api=api)
+                          no_source_reason=action.get('no_source_reason'), db_path=db_path,
+                          api=api, origin='recovery')
         if life.snapshot(folder, worker)['state'] != 'closed':
             raise ValueError('closure unresolved; no retry or guessed acknowledgement')
         try:

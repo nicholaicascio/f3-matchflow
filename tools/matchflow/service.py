@@ -236,13 +236,82 @@ def submit_artifact(db, cid, proof=False):
     return Path(row['artifact_path'])
 
 
+def _near_miss_assessment(folder, worker, state, cid, notes, db_path, origin):
+    """Validate a voluntary near-miss review without freezing source or writing evidence.
+
+    A forced closure (deadline, STOP, host cleanup, recovery, operator) records the
+    measured case without demanding model prose.  A worker that still has
+    experiment time and a close residual must name the best check, what it tested,
+    what remains untried and why stopping now is justified.
+    """
+    with closing(ledger.connect(db_path)) as db:
+        near = ledger.near_miss(db, cid)
+    voluntary = origin == 'worker' and life.voluntary_experiment(folder, worker, state)
+    if near and voluntary:
+        supplied = notes.get('near_miss_review') if isinstance(notes, dict) else None
+        if not isinstance(supplied, dict):
+            raise ValueError('a near miss needs near_miss_review before voluntary give-up '
+                             '(best_check_id, tested, untried, stop_reason)')
+        best = supplied.get('best_check_id')
+        if type(best) is not int or best != near['check_id']:
+            raise ValueError('near-miss review must name the current best valid check %d' % near['check_id'])
+        for key, minimum in (('tested', 10), ('stop_reason', 20)):
+            if not isinstance(supplied.get(key), str) or len(supplied[key].strip()) < minimum:
+                raise ValueError('near-miss review %s needs substantive text' % key)
+        if not isinstance(supplied.get('untried'), str) or not supplied['untried'].strip():
+            raise ValueError("near-miss review untried must be concrete text or 'none'")
+        record = dict(schema_version=1, claim_id=cid, address=state['address'], status='accepted',
+                      request=dict(best_check_id=best, tested=supplied['tested'].strip(),
+                                   untried=supplied['untried'].strip(),
+                                   stop_reason=supplied['stop_reason'].strip()),
+                      host=dict(near, voluntary=voluntary, phase=life.phase(state)),
+                      origin=origin,
+                      remaining_experiment_seconds=round(life.remaining_experiment_seconds(state), 1),
+                      recorded_utc=life.stamp())
+    else:
+        record = dict(schema_version=1, claim_id=cid, address=state['address'], status='not_required',
+                      request=None,
+                      host=(dict(near, voluntary=voluntary, phase=life.phase(state)) if near else None),
+                      origin=origin,
+                      reason='no_near_miss' if not near else 'forced_or_host_closure',
+                      remaining_experiment_seconds=round(life.remaining_experiment_seconds(state), 1),
+                      recorded_utc=life.stamp())
+    path = folder / worker / 'near-miss-review.json'
+    if path.exists():
+        previous = life.load(path)
+        if previous.get('status') != record['status'] or previous.get('request') != record['request']:
+            raise ValueError('a different near-miss review is already recorded; reconcile without retry')
+        return previous
+    return record
+
+
+def _record_near_miss(folder, worker, cid, record, db_path):
+    path = folder / worker / 'near-miss-review.json'
+    if path.exists():
+        previous = life.load(path)
+        if previous != record:
+            raise ValueError('a different near-miss review is already recorded; reconcile without retry')
+    else:
+        life.save(path, record)
+    with closing(ledger.connect(db_path)) as db:
+        if db.execute('SELECT 1 FROM attempts WHERE claim_id=?', (cid,)).fetchone():
+            stored = db.execute("SELECT 1 FROM events WHERE claim_id=? AND kind='near_miss_review' "
+                                "AND payload=? LIMIT 1", (cid, json.dumps(record))).fetchone()
+            if not stored:
+                with db:
+                    ledger.event(db, cid, 'near_miss_review', record)
+    return life.load(path)
+
+
 def close(folder, worker, operation, source=None, notes=None, no_source_reason=None,
-          db_path=ledger.DEFAULT_DB, api=request):
+          db_path=ledger.DEFAULT_DB, api=request, origin='operator'):
     # Validate model-controlled shapes before any network or closure reservation.
     if notes is not None and not isinstance(notes, dict):
         raise ValueError('closure notes must be an object, not encoded JSON or a list')
     if no_source_reason is not None and (not isinstance(no_source_reason, str) or not no_source_reason.strip()):
         raise ValueError('no-source reason must be substantive text')
+    if origin not in ('worker', 'recovery', 'operator'):
+        raise ValueError('unknown closure origin')
     folder = Path(folder)
     state = life.snapshot(folder, worker)
     cid = state['claim_id']
@@ -284,6 +353,11 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
                     raise ValueError('flag-proof requires a concise explanation of the flags discrepancy')
     else:
         raise ValueError('only giveup, submit or flag-proof supported')
+    # All reversible validation (including a near-miss review) happens before the
+    # immutable closure source is created, so a rejected give-up cannot freeze the
+    # wrong candidate and block a later, better handoff.
+    near_record = (_near_miss_assessment(folder, worker, state, cid, notes, db_path, origin)
+                   if operation == 'giveup' else None)
     if source:
         frozen = folder / worker / 'closure-source.cpp'
         if frozen.exists():
@@ -292,6 +366,8 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
         else:
             with frozen.open('xb') as output:
                 output.write(data)
+    if near_record is not None:
+        _record_near_miss(folder, worker, cid, near_record, db_path)
     # Reserve once, after local validation/freezing but before network mutation.
     # Failed transport leaves close_pending for read-only reconciliation.
     life.begin_close(folder, worker)

@@ -51,6 +51,12 @@ def transaction(folder):
     try:
         db.execute('CREATE TABLE IF NOT EXISTS workers (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS control (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)')
+        db.execute('''CREATE TABLE IF NOT EXISTS escalations (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, worker TEXT NOT NULL,
+            created TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS escalation_answers (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, worker TEXT NOT NULL,
+            created TEXT NOT NULL, payload TEXT NOT NULL)''')
         db.execute('BEGIN IMMEDIATE')
         yield db
         db.commit()
@@ -70,6 +76,61 @@ def read_worker(db, worker):
 
 def write_worker(db, worker, value):
     db.execute('UPDATE workers SET payload=? WHERE id=?', (json.dumps(value), worker))
+
+
+def escalate(folder, worker, record):
+    """Append one worker help request under the same transaction as its limit check."""
+    with transaction(folder) as db:
+        pending = db.execute("SELECT count(*) FROM escalations WHERE worker=? AND state='pending'",
+                             (worker,)).fetchone()[0]
+        if pending >= 5:
+            raise ValueError('five help requests are already pending; wait for an answer')
+        db.execute('INSERT INTO escalations(id,worker,created,state,payload) VALUES(?,?,?,?,?)',
+                   (record['request_id'], worker, record['created_utc'], 'pending', json.dumps(record)))
+    return record
+
+
+def escalations(folder, worker=None):
+    """Read requests/answers without a lost-update window."""
+    with transaction(folder) as db:
+        if worker is None:
+            requests = db.execute('SELECT seq,worker,state,payload FROM escalations ORDER BY seq').fetchall()
+            answers = db.execute('SELECT seq,worker,payload FROM escalation_answers ORDER BY seq').fetchall()
+        else:
+            requests = db.execute('SELECT seq,worker,state,payload FROM escalations WHERE worker=? ORDER BY seq',
+                                  (worker,)).fetchall()
+            answers = db.execute('SELECT seq,worker,payload FROM escalation_answers WHERE worker=? ORDER BY seq',
+                                 (worker,)).fetchall()
+    value = [dict(json.loads(row['payload']), worker=row['worker'], state=row['state'])
+             for row in requests]
+    responses = [dict(json.loads(row['payload']), worker=row['worker']) for row in answers]
+    return dict(requests=value, responses=responses)
+
+
+def answer_escalation(folder, worker, text, request_id=None):
+    """Atomically select one pending request, answer it and append the response."""
+    if not isinstance(text, str) or not text.strip() or len(text.encode('utf-8')) > 8000:
+        raise ValueError('help answer needs substantive bounded text')
+    with transaction(folder) as db:
+        state = read_worker(db, worker)
+        if state.get('state') != 'claimed':
+            raise ValueError('worker is not active; answering a closed assignment is meaningless')
+        if request_id is None:
+            row = db.execute("SELECT seq,id,payload FROM escalations WHERE worker=? AND state='pending' "
+                             "ORDER BY seq LIMIT 1", (worker,)).fetchone()
+        else:
+            row = db.execute("SELECT seq,id,payload FROM escalations WHERE worker=? AND id=? AND state='pending'",
+                             (worker, request_id)).fetchone()
+        if not row:
+            raise ValueError('no matching pending help request; do not guess or replay an answer')
+        response = dict(request_id=row['id'], text=text.strip(), answered_utc=stamp())
+        request = json.loads(row['payload'])
+        request.update(state='answered', answered_utc=response['answered_utc'])
+        db.execute("UPDATE escalations SET state='answered', payload=? WHERE seq=?",
+                   (json.dumps(request), row['seq']))
+        db.execute('INSERT INTO escalation_answers(request_id,worker,created,payload) VALUES(?,?,?,?)',
+                   (row['id'], worker, response['answered_utc'], json.dumps(response)))
+    return response
 
 
 def dispatch(folder, method):
@@ -133,6 +194,36 @@ def experiment_limit(state):
     if state['register_wall_monotonic'] is not None:
         limits.append(state['register_wall_monotonic'] - state['monotonic_start'] + 1200)
     return min(limits)
+
+
+def remaining_experiment_seconds(state):
+    """Measured time left, never a worker estimate."""
+    return max(0.0, experiment_limit(state) - (time.monotonic() - state['monotonic_start']))
+
+
+def voluntary_experiment(folder, worker, state):
+    """True only while the worker may still run experiments by its own choice.
+
+    Use the same control facts as experiment admission: a stale/missing watchdog
+    and the durable cleanup barrier are forced closure even when experiment time
+    remains and no STOP marker exists.  Otherwise a voluntary near-miss review
+    would obstruct urgent cleanup.
+    """
+    if state.get('state') != 'claimed' or phase(state) != 'experiment' or state.get('closure_requested'):
+        return False
+    if (Path(folder) / 'STOP').exists() or (Path(folder) / worker / 'CLOSE_REQUESTED.json').exists():
+        return False
+    with transaction(folder) as db:
+        row = db.execute('SELECT payload FROM control WHERE id=1').fetchone()
+        if not row:
+            return False
+        control = json.loads(row['payload'])
+        if control.get('cleanup_barrier'):
+            return False
+        heartbeat = control.get('heartbeat')
+        if heartbeat is None or not 0 <= time.monotonic() - heartbeat <= 30:
+            return False
+    return True
 
 
 def progress(folder, worker, flags=None, metric=None, register_wall=False, evidence=None):

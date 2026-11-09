@@ -91,9 +91,12 @@ class BrokerTests(unittest.TestCase):
             self.stack.enter_context(patch.object(module, name, value))
         self.stack.enter_context(patch('preflight.require'))
         item = dict(address='0x00123456', size=100, state='open', co_workers=0,
-                    give_ups=0, open_problem_reports=0, file_problem_reports=0, lane='production',
-                    reason='Reviewed current metadata', history_reviewed=True, history_sources=['fixture'],
-                    prior_verdicts=[], verdict_history='reviewed')
+                    give_ups=0, open_problem_reports=0, file_problem_reports=0,
+                    reason='Reviewed current metadata',
+                    review=dict(history_reviewed=True, history_sources=['fixture'],
+                                prior_verdicts=[], verdict_history='reviewed', report_scope='none',
+                                report_evidence=None, prior_unfit=False,
+                                next_experiment=None, integration_plan=None))
         selection = self.root/'selection.json'
         life.save(selection, dict(checked_at=life.stamp(), targets=[item, dict(item, address='0x00123457')]))
         self.folder = Path(batch.prepare('test', selection)['batch'])
@@ -176,7 +179,10 @@ class BrokerTests(unittest.TestCase):
         root = self.root/'packs/clm_fixture'; root.mkdir(parents=True)
         life.save(root/'pack.json', dict(address='0x00123456', flags=['/MT', '/O2'], size=10))
         with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
-            ledger.register(db, argparse.Namespace(claim='clm_fixture', address='0x00123456', lane='production',
+            ledger.register(db, argparse.Namespace(claim='clm_fixture', address='0x00123456',
+                review=dict(history_reviewed=True, history_sources=['fixture'], prior_verdicts=[],
+                            verdict_history='reviewed', report_scope='none', report_evidence=None,
+                            prior_unfit=False, next_experiment=None, integration_plan=None),
                 model='test/model', variant='max', harness='Offline Test', pack=str(root), deadline=state['deadline_utc'],
                 assignment=str(self.folder/'worker01/assignment.json')))
 
@@ -212,6 +218,321 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(audit['verification'], 'verified')
         with self.assertRaises(ValueError):
             self.call('write', path='candidate.cpp', text='changed')
+
+    def test_permute_is_bounded_verifies_best_and_keeps_evidence(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Permuter can finish it', expected='MATCH')
+        calls = []
+        outer = self
+        class Search:
+            returncode = 0
+            stdout = 'MATCH: written to /mnt/f/private/candidate.permuted.cpp (check it once more with plain f3check, then submit that file)'
+            stderr = ''
+            pid = 4242
+            def __init__(self, cmd, **kwargs):
+                calls.append(cmd)
+                candidate = next((outer.folder/'worker01/permute').rglob('candidate.cpp'))
+                candidate.with_name('candidate.permuted.cpp').write_text('void f() { return 1; }')
+                handle = kwargs.get('stdout')
+                if hasattr(handle, 'write'):
+                    handle.write(self.stdout.encode())
+                    handle.flush()
+            def poll(self): return self.returncode
+            def communicate(self): return self.stdout, self.stderr
+            def kill(self): self.returncode = -1
+            def wait(self, timeout=None): return self.returncode
+        def runner(cmd, **kwargs):
+            matched = dict(status='match', diffs=0, ndiff_insn=0, extent=10,
+                           checker='checker: f3check test, compiler VS2005 SP1')
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(matched), '')
+        with patch.object(ledger.subprocess, 'Popen', side_effect=Search), \
+                patch.object(ledger.subprocess, 'run', side_effect=runner):
+            result = self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
+                               timeout_seconds=60, change='official search', why='Near miss',
+                               expect='MATCH', observed='two instructions differ')
+        permute_call = next(cmd for cmd in calls if '--permute' in cmd)
+        self.assertIn('--trials', permute_call)
+        self.assertIn('20', permute_call)
+        self.assertNotIn('--claim', permute_call)
+        self.assertNotIn('--json', permute_call)
+        self.assertEqual(result['score'], 0)
+        self.assertTrue(result['matched'])
+        self.assertEqual(result['verification']['result']['status'], 'match')
+        self.assertTrue(Path(result['output']).is_file())
+        self.assertEqual(Path(result['output']).read_text(), 'void f() { return 1; }')
+        record = life.load(Path(result['record_path']))
+        self.assertEqual(record['claim_id'], 'clm_fixture')
+        self.assertEqual(record['output_sha256'], ledger.digest(result['output']))
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            self.assertEqual(len(ledger.permute_runs(db, 'clm_fixture')), 1)
+        # Forced closure keeps the permute evidence without demanding a fresh review.
+        (self.folder/'STOP').touch()
+        notes = dict(reason='Forced stop after bounded search', category='out_of_time',
+                     tried='Official permuter best source', still_differs='None; verification matched',
+                     suspected_cause='Not applicable')
+        def api(tool, body):
+            if tool == 'status':
+                return dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            if tool == 'checkpoint':
+                return dict(checkpoint_id='chk_notes')
+            raise AssertionError(tool)
+        broker.worker_call('ses_child1', 'close', dict(operation='giveup', source=Path(result['output']).name,
+                           notes=notes), api=api)
+        broker.worker_call('ses_child1', 'checkpoint', dict(phase='notes', note='Permute evidence retained.'), api=api)
+        report = self.call('report')
+        self.assertEqual(report['permute_runs'][0]['run_id'], result['run_id'])
+        audited = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
+                                               life.snapshot(self.folder, 'worker01'),
+                                               dict(open_claims=[]), ledger.DEFAULT_DB)
+        self.assertEqual(audited['evidence_errors'], [])
+        raw_file = Path(result['record_path']).with_name('raw.json')
+        raw_original = raw_file.read_bytes()
+        raw_file.write_text('{}', encoding='utf-8')
+        tampered_raw = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
+                                                    life.snapshot(self.folder, 'worker01'),
+                                                    dict(open_claims=[]), ledger.DEFAULT_DB)
+        self.assertTrue(any('permutation' in e for e in tampered_raw['evidence_errors']))
+        raw_file.write_bytes(raw_original)
+        record_file = Path(result['record_path'])
+        damaged = life.load(record_file)
+        damaged.pop('source_path')
+        life.save(record_file, damaged)
+        tampered = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
+                                                life.snapshot(self.folder, 'worker01'),
+                                                dict(open_claims=[]), ledger.DEFAULT_DB)
+        self.assertTrue(any('permutation' in e for e in tampered['evidence_errors']))
+
+    def test_permute_stops_at_stop_and_does_not_publish_candidate(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        outer = self
+        class Search:
+            returncode = 0
+            stdout = 'MATCH: written to /mnt/f/private/candidate.permuted.cpp'
+            stderr = ''
+            pid = 4243
+            def __init__(self, cmd, **kwargs):
+                self.polls = 0
+                (outer.folder/'STOP').touch()
+            def poll(self):
+                self.polls += 1
+                return 0 if self.polls > 1 else None
+            def communicate(self): return self.stdout, self.stderr
+            def kill(self): self.returncode = -1
+            def wait(self, timeout=None): return self.returncode
+        with patch.object(ledger.subprocess, 'Popen', side_effect=Search), \
+                patch.object(ledger.subprocess, 'run') as verification:
+            with self.assertRaisesRegex(ValueError, 'stopped by STOP'):
+                self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
+                          timeout_seconds=60, change='search', why='Near miss', expect='MATCH',
+                          observed='two instructions differ')
+            verification.assert_not_called()
+        self.assertFalse(list((self.folder/'worker01/files').glob('permuted-*.cpp')))
+        record = life.load(next((self.folder/'worker01/permute').rglob('run.json')))
+        self.assertTrue(record['stopped_mid_run'])
+        self.assertEqual(record['verification_disposition'], 'stopped')
+        self.assertIsNone(record['usable_path'])
+        notes = dict(reason='STOP during bounded search', category='out_of_time',
+                     tried='Official permuter', still_differs='Two instructions',
+                     suspected_cause='Compiler register choice')
+        def api(tool, body):
+            if tool == 'status':
+                return dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            if tool == 'checkpoint':
+                return dict(checkpoint_id='chk_notes')
+            raise AssertionError(tool)
+        broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='candidate.cpp', notes=notes), api=api)
+        broker.worker_call('ses_child1', 'checkpoint', dict(phase='notes', note='Stopped search evidence retained.'), api=api)
+        report = self.call('report')
+        self.assertEqual(report['permute_runs'][0]['verification_disposition'], 'stopped')
+        audited = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
+                                               life.snapshot(self.folder, 'worker01'),
+                                               dict(open_claims=[]), ledger.DEFAULT_DB)
+        self.assertEqual(audited['evidence_errors'], [])
+
+    def test_permute_rejects_before_gate_and_out_of_bounds(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        with patch.object(ledger.subprocess, 'run') as runner:
+            with self.assertRaisesRegex(ValueError, 'continue gate'):
+                self.call('permute', source='candidate.cpp', trials=20, jobs=1, timeout_seconds=60)
+            runner.assert_not_called()
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        for data in (dict(trials=5), dict(trials=401), dict(jobs=0), dict(jobs=9),
+                     dict(timeout_seconds=10), dict(timeout_seconds=601), dict(flags='/FIsecret')):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                self.call('permute', source='candidate.cpp', **data)
+        with self.assertRaises(ValueError):
+            self.call('permute', source='../assignment.json', trials=20, jobs=1, timeout_seconds=60)
+
+    def test_escalate_wakes_monitor_and_parent_answer_is_read(self):
+        self.owned_fixture()
+        first = self.call('escalate', reason='Toolchain inspection needed',
+                          need='Check whether the configured pack has the documented helper',
+                          evidence='The missing declaration blocks the next experiment')
+        second = self.call('escalate', reason='Second decision needed',
+                           need='Choose whether to keep the supplied draft shape')
+        self.assertEqual(first['state'], 'pending')
+        self.assertEqual(life.snapshot(self.folder, 'worker01')['state'], 'claimed')
+        listed = batch.help_requests('test')
+        self.assertEqual(len(listed['requests']), 2)
+        self.assertEqual(batch.monitor('test')['state'], 'worker_help_requested')
+        answered = batch.answer('test', 'worker01', 'Inspected: the helper is absent from this pack.',
+                                first['request_id'])
+        self.assertEqual(answered['request_id'], first['request_id'])
+        remaining = [r for r in batch.help_requests('test')['requests'] if r.get('state') == 'pending']
+        self.assertEqual([r['request_id'] for r in remaining], [second['request_id']])
+        batch.answer('test', 'worker01', 'Keep the supplied draft shape for now.')
+        status = self.call('status')
+        self.assertEqual(status['help']['responses'][0]['text'], 'Inspected: the helper is absent from this pack.')
+        self.assertEqual(status['help']['responses'][1]['text'], 'Keep the supplied draft shape for now.')
+        with self.assertRaisesRegex(ValueError, 'no matching pending'):
+            batch.answer('test', 'worker01', 'Third answer')
+
+    def test_voluntary_near_miss_giveup_requires_review(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            checked = self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        notes = dict(reason='Wall', category='register_allocation', tried='Tested two source shapes',
+                     still_differs='Two instructions at head', suspected_cause='Temporary lifetime')
+        api = unittest.mock.Mock(return_value=dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)]))
+        with self.assertRaisesRegex(ValueError, 'near_miss_review'):
+            broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='candidate.cpp', notes=notes), api=api)
+        self.assertEqual(life.snapshot(self.folder, 'worker01')['state'], 'claimed')
+        self.assertFalse((self.folder/'worker01/closure-source.cpp').exists())
+        notes['near_miss_review'] = dict(best_check_id=checked['check_id'],
+                                         tested='Two declaration orders and a named temporary',
+                                         untried='none; both plausible source shapes were checked',
+                                         stop_reason='The remaining difference is a compiler register choice, not a source shape')
+        closed = False
+        def api(tool, body):
+            nonlocal closed
+            if tool == 'status':
+                return dict(open_claims=[] if closed else [dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                closed = True
+                return dict(released=True, best_code='best_code kept: fixture')
+            if tool == 'checkpoint':
+                return dict(checkpoint_id='chk_notes')
+            raise AssertionError(tool)
+        broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='candidate.cpp', notes=notes), api=api)
+        record = life.load(self.folder/'worker01/near-miss-review.json')
+        self.assertEqual(record['status'], 'accepted')
+        self.assertEqual(record['request']['best_check_id'], checked['check_id'])
+        broker.worker_call('ses_child1', 'checkpoint', dict(phase='notes', note='Near-miss review recorded.'), api=api)
+        report = self.call('report')
+        self.assertEqual(report['outcome'], 'given_up')
+        self.assertEqual(report['near_miss']['status'], 'accepted')
+        audit = broker.evidence.audit_worker(self.folder, life.load(self.folder/'batch.json')['tasks'][0],
+                                             life.snapshot(self.folder, 'worker01'), dict(open_claims=[]), ledger.DEFAULT_DB)
+        self.assertEqual(audit['evidence_errors'], [])
+
+    def test_forced_giveup_does_not_require_near_miss_review(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        (self.folder/'STOP').touch()
+        notes = dict(reason='STOP', category='out_of_time', tried='Tested source shapes',
+                     still_differs='Two instructions', suspected_cause='Temporary lifetime')
+        def api(tool, body):
+            if tool == 'status':
+                return dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            raise AssertionError(tool)
+        broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='candidate.cpp', notes=notes), api=api)
+        record = life.load(self.folder/'worker01/near-miss-review.json')
+        self.assertEqual(record['status'], 'not_required')
+        self.assertEqual(record['reason'], 'forced_or_host_closure')
+
+    def test_supervisor_loss_makes_near_miss_closure_forced(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        with life.transaction(self.folder) as db:
+            value = json.loads(db.execute('SELECT payload FROM control').fetchone()['payload'])
+            value['heartbeat'] = life.time.monotonic()-31
+            db.execute('UPDATE control SET payload=?', (json.dumps(value),))
+        notes = dict(reason='Supervisor lost', category='out_of_time', tried='Source shapes',
+                     still_differs='Two instructions', suspected_cause='Temporary lifetime')
+        def api(tool, body):
+            if tool == 'status':
+                return dict(open_claims=[dict(claim_id='clm_fixture', address='0x00123456', this_key=True)])
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            raise AssertionError(tool)
+        broker.worker_call('ses_child1', 'close', dict(operation='giveup', source='candidate.cpp', notes=notes), api=api)
+        record = life.load(self.folder/'worker01/near-miss-review.json')
+        self.assertEqual(record['status'], 'not_required')
+        self.assertFalse(record['host']['voluntary'])
+
+    def test_permute_unconfirmed_termination_blocks_publication_and_latches_cleanup(self):
+        self.owned_fixture()
+        self.call('write', path='candidate.cpp', text='void f() { return 0; }')
+        result = dict(status='wip', diffs=4, ndiff_insn=2, extent=10,
+                      checker='checker: f3check test, compiler VS2005 SP1')
+        with patch.object(ledger.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, json.dumps(result), '')):
+            self.call('check', source='candidate.cpp', stage='baseline', why='Baseline near miss')
+        self.call('gate', decision='continue', reason='Near miss', hypothesis='Search', expected='MATCH')
+        outer = self
+        class Search:
+            returncode = 0
+            stdout = 'MATCH: written to /mnt/f/private/candidate.permuted.cpp'
+            stderr = ''
+            pid = 4244
+            def __init__(self, cmd, **kwargs):
+                candidate = next((outer.folder/'worker01/permute').rglob('candidate.cpp'))
+                candidate.with_name('candidate.permuted.cpp').write_text('void f() { return 1; }')
+                (candidate.parent/'CANCEL.unconfirmed').write_text('group kill failed')
+            def poll(self): return 0
+            def communicate(self): return self.stdout, self.stderr
+            def kill(self): self.returncode = -1
+            def wait(self, timeout=None): return self.returncode
+        with patch.object(ledger.subprocess, 'Popen', side_effect=Search), \
+                patch.object(ledger.subprocess, 'run') as verification:
+            with self.assertRaisesRegex(ValueError, 'termination could not be confirmed'):
+                self.call('permute', source='candidate.cpp', stage='attempt', trials=20, jobs=1,
+                          timeout_seconds=60, change='search', why='Near miss', expect='MATCH',
+                          observed='two instructions differ')
+            verification.assert_not_called()
+        self.assertFalse(list((self.folder/'worker01/files').glob('permuted-*.cpp')))
+        state = life.snapshot(self.folder, 'worker01')
+        self.assertTrue(state.get('closure_requested'))
+        self.assertTrue((self.folder/'worker01/CLOSE_REQUESTED.json').exists())
+        record = life.load(next((self.folder/'worker01/permute').rglob('run.json')))
+        self.assertTrue(record['termination_unconfirmed'])
+        self.assertTrue(record['cleanup_latched'])
+        self.assertEqual(record['verification_disposition'], 'termination_unconfirmed')
 
     def test_worker_cannot_supply_include_or_output_compiler_options(self):
         self.owned_fixture()

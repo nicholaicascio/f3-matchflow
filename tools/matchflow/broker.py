@@ -14,20 +14,16 @@ import sys
 
 import batch
 import evidence
+import flags as flagset
 import lifecycle as life
 import matchflow as ledger
+import review
 import service
 from config import workspace_root, REPOSITORY, runtime
 from security import private_root, scoped, no_links
 from transport import ServiceError
 
 MAX_TEXT = 256 * 1024
-SAFE_FLAGS = {f.lower() for f in (
-    '/MT', '/MTd', '/MD', '/MDd', '/O1', '/O2', '/Od', '/Ox', '/Ob0', '/Ob1', '/Ob2',
-    '/Oi', '/Oi-', '/Os', '/Ot', '/Oy', '/Oy-', '/GS', '/GS-', '/EHsc', '/EHa', '/Gy',
-    '/Gy-', '/GR', '/GR-', '/GL', '/GL-', '/Gd', '/Gr', '/Gz', '/fp:precise', '/fp:fast',
-    '/fp:strict', '/arch:SSE', '/arch:SSE2', '/arch:IA32', '/Zc:wchar_t', '/Zc:wchar_t-',
-    '/Zc:forScope', '/Zc:forScope-')}
 
 
 def registry():
@@ -140,7 +136,8 @@ def start(session, api=service.request, acquire=None):
         life.setup_step(folder, worker, 'register')
         state = life.snapshot(folder, worker)
         model, _, variant = state['model'].partition('#')
-        args = argparse.Namespace(claim=cid, address=state['address'], lane=assignment['target']['lane'],
+        args = argparse.Namespace(claim=cid, address=state['address'],
+                                  review=review.for_report(assignment['target']),
                                   model=model, variant=variant or 'default', harness='OpenCode', pack=str(pack),
                                   deadline=state['deadline_utc'], assignment=str(folder/worker/'assignment.json'))
         with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
@@ -223,7 +220,20 @@ def worker_call(session, op, data, api=service.request):
         raise ValueError('tool input must be a small object')
     cid = state.get('claim_id')
     if op == 'status':
+        value = life.escalations(folder, worker)
+        help_value = dict(
+            pending=[{k: r.get(k) for k in ('request_id', 'created_utc', 'reason', 'need')}
+                     for r in value.get('requests', []) if r.get('state') == 'pending'],
+            responses=[{k: r.get(k) for k in ('request_id', 'answered_utc', 'text')}
+                       for r in value.get('responses', [])][-5:])
+        near = None
+        if cid and Path(ledger.DEFAULT_DB).is_file():
+            with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+                near = ledger.near_miss(db, cid)
         return dict(target=assignment['target'], ownership=state, phase=life.phase(state),
+                    remaining_experiment_seconds=round(life.remaining_experiment_seconds(state), 1)
+                    if state.get('state') == 'claimed' else 0,
+                    near_miss=near, help=help_value,
                     close_requested=bool(state.get('closure_requested')) or
                                     (folder/worker/'CLOSE_REQUESTED.json').exists() or (folder/'STOP').exists())
     if op == 'completion':
@@ -327,9 +337,7 @@ def worker_call(session, op, data, api=service.request):
         if stage not in ('baseline', 'attempt', 'final'):
             raise ValueError('invalid check stage')
         alternate = data.get('flags')
-        if alternate is not None and (not isinstance(alternate, str) or
-                not alternate or any(f.lower() not in SAFE_FLAGS for f in alternate.split(','))):
-            raise ValueError('only documented codegen flags allowed; include/output/path options forbidden')
+        flagset.alternate(alternate)
         args = argparse.Namespace(claim=cid, source=str(source), stage=stage, flags=data.get('flags'),
                                   evidence_dir=None, import_evidence=None,
                                   **{k: data.get(k) for k in ('change', 'observed', 'why', 'expect', 'regions')})
@@ -337,6 +345,22 @@ def worker_call(session, op, data, api=service.request):
             result = ledger.check(db, args)
         raw = life.load(result['evidence'])
         return dict(**result, output=raw['stdout'][:MAX_TEXT], stderr=raw['stderr'][:8000])
+    if op == 'permute':
+        source = scoped(files, data['source'], exists=True)
+        if source.suffix.lower() != '.cpp':
+            raise ValueError('C++ source required')
+        if data.get('stage') not in (None, 'attempt', 'final'):
+            raise ValueError('permutation verification stage must be attempt or final')
+        flagset.alternate(data.get('flags'))
+        life.require_experiment(folder, worker)
+        args = argparse.Namespace(claim=cid, source=str(source), stage=data.get('stage') or 'attempt',
+                                  flags=data.get('flags'), evidence_dir=None,
+                                  trials=data.get('trials', 120), jobs=data.get('jobs', 2),
+                                  timeout_seconds=data.get('timeout_seconds', 240),
+                                  **{k: data.get(k) for k in ('change', 'observed', 'why', 'expect', 'regions')})
+        with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
+            result = ledger.permute(db, args)
+        return result
     if op == 'gate':
         life.require_experiment(folder, worker)
         if data.get('decision') not in ('continue', 'stop') or not data.get('reason'):
@@ -344,6 +368,26 @@ def worker_call(session, op, data, api=service.request):
         with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
             return ledger.gate(db, argparse.Namespace(claim=cid, decision=data['decision'], reason=data['reason'],
                     hypothesis=data.get('hypothesis'), expected=data.get('expected'), integration_plan=data.get('integration_plan')))
+    if op == 'escalate':
+        if state['state'] != 'claimed':
+            raise ValueError('help can be requested only while the claim is active')
+        reason = data.get('reason')
+        need = data.get('need')
+        help_evidence = data.get('evidence') or ''
+        for name, value in (('reason', reason), ('need', need), ('evidence', help_evidence)):
+            if not isinstance(value, str) or len(value.encode('utf-8')) > 4000:
+                raise ValueError('help %s must be bounded text' % name)
+        if not reason.strip() or not need.strip():
+            raise ValueError('help needs a concrete reason and the capability requested')
+        request_id = 'help-' + life.uuid.uuid4().hex[:12]
+        life.escalate(folder, worker, dict(
+            request_id=request_id, created_utc=life.stamp(), state='pending',
+            reason=reason.strip(), need=need.strip(), evidence=help_evidence.strip()[:4000],
+            address=state['address'], claim_id=cid, session_id=state['session_id'],
+            phase=life.phase(state),
+            remaining_experiment_seconds=round(life.remaining_experiment_seconds(state), 1)))
+        return dict(request_id=request_id, state='pending',
+                    note='Parent monitor is notified. The claim and deadlines are unchanged; continue useful work.')
     if op == 'register_wall':
         return life.progress(folder, worker, register_wall=True, evidence=data.get('evidence'))
     if op == 'promote':
@@ -383,7 +427,8 @@ def worker_call(session, op, data, api=service.request):
             with closing(ledger.connect(ledger.DEFAULT_DB)) as db:
                 source = str(checked_source(db, cid, data['check_id']))
         result = service.close(folder, worker, operation, source=source, notes=data.get('notes'),
-                               no_source_reason=data.get('no_source_reason'), db_path=ledger.DEFAULT_DB, api=api)
+                               no_source_reason=data.get('no_source_reason'), db_path=ledger.DEFAULT_DB,
+                               api=api, origin='worker')
         return result['assessment']
     if op == 'checks':
         # Closure-safe inspection, no compile, restoration, edits or sibling data.

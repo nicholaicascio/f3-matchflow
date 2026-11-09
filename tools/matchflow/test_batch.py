@@ -6,14 +6,20 @@ import unittest
 from unittest.mock import patch
 
 import batch
+import review
 
 
 class BatchTests(unittest.TestCase):
-    def selection(self, **target):
+    def selection(self, review=None, **target):
         item = dict(address='0x00123456', size=100, state='open', co_workers=0,
                     give_ups=0, open_problem_reports=0, file_problem_reports=0,
-                    lane='production', reason='Reviewed current metadata', history_reviewed=True,
-                    history_sources=['offline fixture'], prior_verdicts=[], verdict_history='reviewed')
+                    reason='Reviewed current metadata')
+        item['review'] = dict(history_reviewed=True, history_sources=['offline fixture'],
+                              prior_verdicts=[], verdict_history='reviewed', report_scope='none',
+                              report_evidence=None, prior_unfit=False,
+                              next_experiment=None, integration_plan=None)
+        if review:
+            item['review'].update(review)
         item.update(target)
         return dict(checked_at=batch.now(), targets=[item])
 
@@ -21,19 +27,113 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(batch.DEFAULT_MODEL, 'opencode-go/deepseek-v4.1-flash#max')
 
     def test_valid_selection(self):
-        self.assertEqual(len(batch.validate_selection(self.selection())), 1)
+        targets = batch.validate_selection(self.selection())
+        self.assertEqual(len(targets), 1)
+        self.assertNotIn('lane', targets[0])
+        self.assertEqual(targets[0]['review']['report_scope'], 'none')
 
-    def test_prior_verdict_routes_integration_even_without_prior_unfit_flag(self):
-        with self.assertRaisesRegex(ValueError, 'integration'):
-            batch.validate_selection(self.selection(prior_verdicts=['unfit']))
+    def test_sibling_report_does_not_exclude_an_otherwise_good_target(self):
+        targets = batch.validate_selection(self.selection(
+            review=dict(report_scope='sibling', report_evidence='Report names another function in this file'),
+            file_problem_reports=1))
+        self.assertEqual(targets[0]['review']['report_scope'], 'sibling')
 
-    def test_unknown_history_not_clean_production(self):
-        with self.assertRaisesRegex(ValueError, 'unknown verdict'):
-            batch.validate_selection(self.selection(verdict_history='unknown'))
+    def test_file_reports_need_a_reviewed_scope_not_a_silent_none(self):
+        with self.assertRaisesRegex(ValueError, 'file reports'):
+            batch.validate_selection(self.selection(file_problem_reports=1))
+        targets = batch.validate_selection(self.selection(
+            review=dict(report_scope='none', report_evidence='Reviewed; the report concerns a different helper'),
+            file_problem_reports=1))
+        self.assertEqual(targets[0]['review']['report_scope'], 'none')
 
-    def test_research_requires_specific_hypothesis(self):
-        with self.assertRaisesRegex(ValueError, 'new_hypothesis'):
-            batch.validate_selection(self.selection(lane='research', give_ups=4))
+    def test_open_function_report_cannot_be_declared_none_or_sibling(self):
+        for scope in ('none', 'sibling'):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, 'open report'):
+                batch.validate_selection(self.selection(
+                    review=dict(report_scope=scope, report_evidence='checked'),
+                    open_problem_reports=1))
+
+    def test_function_report_requires_a_concrete_next_experiment(self):
+        with self.assertRaisesRegex(ValueError, 'next_experiment'):
+            batch.validate_selection(self.selection(
+                review=dict(report_scope='function', report_evidence='Report on this exact address')))
+
+    def test_repeated_attempts_require_a_concrete_next_experiment(self):
+        with self.assertRaisesRegex(ValueError, 'next_experiment'):
+            batch.validate_selection(self.selection(give_ups=4))
+
+    def test_prior_unfit_requires_an_integration_plan_not_a_lane(self):
+        with self.assertRaisesRegex(ValueError, 'integration plan'):
+            batch.validate_selection(self.selection(review=dict(prior_unfit=True)))
+        targets = batch.validate_selection(self.selection(
+            review=dict(prior_unfit=True, integration_plan='Reconcile the named full-unit type clash',
+                        next_experiment='Repair the named type clash before rechecking')))
+        self.assertTrue(targets[0]['review']['prior_unfit'])
+
+    def test_prior_verdict_unfit_requires_an_integration_plan(self):
+        with self.assertRaisesRegex(ValueError, 'integration plan'):
+            batch.validate_selection(self.selection(review=dict(prior_verdicts=['unfit'])))
+
+    def test_unknown_verdict_history_is_recorded_not_fabricated(self):
+        targets = batch.validate_selection(self.selection(review=dict(verdict_history='unknown')))
+        self.assertEqual(targets[0]['review']['verdict_history'], 'unknown')
+
+    def test_review_facts_are_type_checked_and_idempotent(self):
+        with self.assertRaisesRegex(ValueError, 'next_experiment'):
+            batch.validate_selection(self.selection(
+                review=dict(prior_verdicts=['unfit'], prior_unfit=False,
+                            integration_plan='Repair the full-unit type clash')))
+        with self.assertRaisesRegex(ValueError, 'next_experiment'):
+            batch.validate_selection(self.selection(review=dict(next_experiment=123)))
+        with self.assertRaisesRegex(ValueError, 'next_experiment'):
+            batch.validate_selection(self.selection(
+                review=dict(prior_verdicts=['unfit '], prior_unfit=False,
+                            integration_plan='repair the full-unit type clash')))
+        facts = review.normalized(dict(
+            review=dict(history_reviewed=True, history_sources=['fixture'], prior_verdicts=[],
+                        verdict_history='reviewed', report_scope='sibling',
+                        report_evidence='saved report on another function', prior_unfit=False,
+                        next_experiment=None, integration_plan=None),
+            give_ups=0, open_problem_reports=0))
+        self.assertEqual(review.normalized(dict(review=facts, give_ups=0, open_problem_reports=0)), facts)
+
+    def test_legacy_report_facts_do_not_invent_a_plan(self):
+        item = dict(address='0x00123456', size=100, state='open', co_workers=0,
+                    give_ups=4, open_problem_reports=0, file_problem_reports=0,
+                    lane='integration', reason='Legacy', history_reviewed=True,
+                    history_sources=['legacy'], prior_verdicts=[], verdict_history='reviewed',
+                    prior_unfit=True)
+        facts = review.for_report(item)
+        self.assertTrue(facts['prior_unfit'])
+        self.assertIsNone(facts['integration_plan'])
+        self.assertEqual(facts['report_scope'], 'none')
+
+    def test_legacy_lane_selection_is_translated_once(self):
+        item = dict(address='0x00123456', size=100, state='open', co_workers=0,
+                    give_ups=4, open_problem_reports=0, file_problem_reports=1,
+                    lane='research', new_hypothesis='Named source shape from the saved report',
+                    reason='Legacy prepared selection', history_reviewed=True,
+                    history_sources=['legacy fixture'], prior_verdicts=[], verdict_history='reviewed')
+        targets = batch.validate_selection(dict(checked_at=batch.now(), targets=[item]))
+        self.assertNotIn('lane', targets[0])
+        self.assertEqual(targets[0]['review']['next_experiment'], 'Named source shape from the saved report')
+        self.assertEqual(targets[0]['review']['report_scope'], 'unknown')
+
+    def test_review_and_lane_together_are_rejected(self):
+        data = self.selection()
+        data['targets'][0]['lane'] = 'production'
+        with self.assertRaisesRegex(ValueError, 'lane'):
+            batch.validate_selection(data)
+
+    def test_prompt_reports_facts_without_a_lane(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(batch, 'BATCHES', Path(directory)/'batches'), \
+                patch.object(batch, 'ROOT', Path(directory)):
+            selection = Path(directory)/'selection.json'; batch.save(selection, self.selection())
+            folder = Path(batch.prepare('test', selection)['batch'])
+            prompt = (folder/'worker01/prompt.txt').read_text(encoding='utf-8')
+            self.assertIn('prior verdicts: none', prompt)
+            self.assertIn("report scope: none", prompt)
+            self.assertNotIn('lane', prompt.lower())
 
     def test_daily_and_pending_capacity_checked_before_launch(self):
         status = dict(limits=dict(claims=20, subsPerDay=10, pending=10), open_claims=[], submissions_today=9)
@@ -80,12 +180,6 @@ class BatchTests(unittest.TestCase):
         data = self.selection(); data['checked_at'] = '2020-01-01T00:00:00Z'
         with self.assertRaises(ValueError): batch.validate_selection(data)
 
-    def test_no_silent_research_as_production(self):
-        with self.assertRaises(ValueError): batch.validate_selection(self.selection(give_ups=3))
-
-    def test_unfit_requires_integration(self):
-        with self.assertRaises(ValueError): batch.validate_selection(self.selection(prior_unfit=True, lane='research'))
-
     def test_cap_cannot_be_bypassed(self):
         snapshot = dict(checked_at=batch.now(), status=dict(limits=dict(claims=20), open_claims=[{}]))
         with self.assertRaises(ValueError): batch.capacity(snapshot, 20)
@@ -103,6 +197,8 @@ class BatchTests(unittest.TestCase):
             assignment = batch.load(folder/'worker01/assignment.json')
             self.assertEqual(assignment['claim_body']['address'], '0x00123456')
             self.assertNotIn('band', assignment['claim_body'])
+            self.assertNotIn('lane', assignment['target'])
+            self.assertIn('review', assignment['target'])
             self.assertEqual(assignment['claim_body']['effort'], 'max')
             self.assertEqual(batch.load(folder/'batch.json')['tasks'][0]['agent'], 'match-worker')
             self.assertFalse((folder/'workflow-args.json').exists())

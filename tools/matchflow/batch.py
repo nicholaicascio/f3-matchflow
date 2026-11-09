@@ -10,6 +10,7 @@ import sys
 import uuid
 
 import lifecycle
+import review
 from config import workspace_root
 
 ROOT = workspace_root()
@@ -44,7 +45,7 @@ def validate_selection(selection):
     seen = set()
     for target in targets:
         if not {'address', 'size', 'state', 'co_workers', 'give_ups',
-                'open_problem_reports', 'file_problem_reports', 'lane', 'reason'} <= target.keys():
+                'open_problem_reports', 'file_problem_reports', 'reason'} <= target.keys():
             raise ValueError('Selection is missing current function_info fields or review annotations')
         address = target['address']
         if not re.fullmatch(r'0x[0-9a-f]{8}', address) or address in seen:
@@ -52,29 +53,18 @@ def validate_selection(selection):
         seen.add(address)
         if target.get('state') != 'open' or target.get('co_workers', 0):
             raise ValueError('Only currently open, unheld functions may be dispatched')
-        if target.get('lane') not in ('production', 'research', 'integration') or not target.get('reason'):
-            raise ValueError('Each selection needs a reviewed lane and reason')
+        if not isinstance(target.get('reason'), str) or not target['reason'].strip():
+            raise ValueError('Each selection needs a reviewed reason')
         if not isinstance(target.get('size'), int) or target['size'] <= 0:
             raise ValueError('Missing function size')
-        if target['lane'] == 'production' and (target.get('give_ups', 0) >= 3 or
-                target.get('open_problem_reports', 0) or target.get('file_problem_reports', 0) or
-                target.get('prior_unfit')):
-            raise ValueError('Recurring blockers/reports/unfit are not production assignments')
-        if target.get('prior_unfit') and target['lane'] != 'integration':
-            raise ValueError('Prior unfit requires integration lane')
-        verdicts = target.get('prior_verdicts')
-        if not isinstance(verdicts, list) or target.get('verdict_history') not in ('reviewed', 'unknown'):
-            raise ValueError('prior_verdicts list and verdict_history reviewed/unknown required')
-        if target.get('history_reviewed') is not True or not target.get('history_sources'):
-            raise ValueError('review history and name its evidence sources before dispatch')
-        if 'unfit' in verdicts and target['lane'] != 'integration':
-            raise ValueError('Prior unfit requires integration lane')
-        if target['lane'] == 'production' and target['verdict_history'] == 'unknown':
-            raise ValueError('unknown verdict history is not a clean production assignment')
-        if target['lane'] == 'research' and not all(
-                isinstance(target.get(k), str) and len(target[k].strip()) >= 20
-                for k in ('new_hypothesis', 'expected_observation')):
-            raise ValueError('research needs a specific new_hypothesis and expected_observation')
+        for key in ('give_ups', 'open_problem_reports', 'file_problem_reports', 'co_workers'):
+            if type(target.get(key, 0)) is not int or target.get(key, 0) < 0:
+                raise ValueError('selection %s must be a nonnegative integer' % key)
+        # Report scope, repeated blockers and prior integration failure are separate
+        # facts.  An unrelated sibling report no longer excludes an otherwise good
+        # target, and there is no mutually exclusive lane to choose.
+        target['review'] = review.normalized(target)
+        target.pop('lane', None)
     return targets
 
 
@@ -88,7 +78,7 @@ def prompt_for(assignment):
     from string import Template
     target = load(assignment)['target']
     return Template((CODE/'prompts/worker.txt').read_text(encoding='utf-8')).substitute(
-        address=target['address'], lane=target['lane'], reason=target['reason'])
+        address=target['address'], review=review.summary(target), reason=target['reason'])
 
 
 def prepare(name, selection_path, model=DEFAULT_MODEL):
@@ -105,12 +95,23 @@ def prepare(name, selection_path, model=DEFAULT_MODEL):
                                   (target['address'],)).fetchall()
                 rows += db.execute("SELECT state FROM attempts WHERE address=? AND state='unfit'",
                                    (target['address'],)).fetchall()
-                target['prior_verdicts'] = sorted(set(target.get('prior_verdicts', []) + [r[0] for r in rows]))
+                known = sorted(set(r[0] for r in rows))
+                if 'review' in target:
+                    target['review']['prior_verdicts'] = sorted(
+                        set(target['review'].get('prior_verdicts', []) + known))
+                else:
+                    target['prior_verdicts'] = sorted(set(target.get('prior_verdicts', []) + known))
     targets = validate_selection(selection)
+    # Render every prompt before creating any batch directory, so a fact/type or
+    # template error cannot leave a partial immutable batch behind.
+    from string import Template
+    template = Template((CODE/'prompts/worker.txt').read_text(encoding='utf-8'))
+    prompts = [template.substitute(address=t['address'], review=review.summary(t), reason=t['reason'])
+               for t in targets]
     path = batch_path(name)
     path.mkdir(parents=True, exist_ok=False)
     tasks = []
-    for i, target in enumerate(targets, 1):
+    for i, (target, prompt) in enumerate(zip(targets, prompts), 1):
         worker = path / f'worker{i:02}'
         worker.mkdir()
         assignment = worker / 'assignment.json'
@@ -122,7 +123,6 @@ def prepare(name, selection_path, model=DEFAULT_MODEL):
         save(assignment, dict(schema_version=3, worker=i, model=model, harness='OpenCode', target=target,
                              workspace=str(ROOT), output_dir=str(worker), selection_checked_at=selection['checked_at'],
                              claim_body=claim_body))
-        prompt = prompt_for(assignment)
         (worker/'prompt.txt').write_text(prompt, encoding='utf-8')
         from matchflow import digest
         tasks.append(dict(id=worker.name, address=target['address'], model=model, agent='match-worker',
@@ -203,7 +203,53 @@ def monitor(name):
                     db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(current),))
                     return dict(state='closure_requested', workers=fresh_due, cleanup_required=True,
                                 note='Re-arm monitor while other workers remain; only new requests or escalation wake it.')
+        help_due = help_requests(name)['requests']
+        pending = [r for r in help_due if r.get('state') == 'pending']
+        if pending:
+            with lifecycle.transaction(path) as db:
+                current = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+                seen = current.setdefault('monitor_seen_help', [])
+                fresh_help = [r for r in pending if r['request_id'] not in seen]
+                if fresh_help:
+                    seen.extend(r['request_id'] for r in fresh_help)
+                    db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(current),))
+                    return dict(state='worker_help_requested', workers=fresh_help, cleanup_required=False,
+                                note='A worker is still working. Answer with batch.py answer, then re-arm the monitor.')
         time.sleep(5)
+
+
+def help_requests(name, worker=None):
+    """List durable worker help requests without touching a running session."""
+    path = batch_path(name)
+    tasks = load(path/'batch.json')['tasks']
+    if worker is not None and worker not in {t['id'] for t in tasks}:
+        raise ValueError('unknown prepared worker')
+    requests, responses = [], []
+    for task in tasks:
+        if worker is not None and task['id'] != worker:
+            continue
+        value = lifecycle.escalations(path, task['id'])
+        requests.extend(value['requests'])
+        responses.extend(value['responses'])
+    return dict(requests=requests, responses=responses,
+                note='Requests are informational; answering does not close, extend or replace the claim.')
+
+
+def answer(name, worker, text, request_id=None):
+    """Answer one pending worker help request while its claim stays active."""
+    if not isinstance(text, str) or not text.strip() or len(text.encode('utf-8')) > 8000:
+        raise ValueError('help answer needs substantive bounded text')
+    if not re.fullmatch(r'worker[0-9]{2,3}', worker):
+        raise ValueError('canonical prepared worker required')
+    path = batch_path(name)
+    if not any(t['id'] == worker for t in load(path/'batch.json')['tasks']):
+        raise ValueError('unknown prepared worker')
+    state = lifecycle.snapshot(path, worker)
+    if state['state'] != 'claimed':
+        raise ValueError('worker is not active; answering a closed assignment is meaningless')
+    response = lifecycle.answer_escalation(path, worker, text, request_id)
+    return dict(worker=worker, request_id=response['request_id'], answered=True,
+                note='The worker reads this through status help; the claim and its deadlines are unchanged.')
 
 
 def run_worker(path, task, cli):
@@ -268,6 +314,9 @@ def main():
     p = sub.add_parser('audit'); p.add_argument('batch'); p.add_argument('--status', required=True)
     p = sub.add_parser('dispatch'); p.add_argument('batch'); p.add_argument('--method', choices=['workflow', 'subagents'], required=True); p.add_argument('--status', required=True)
     p = sub.add_parser('monitor'); p.add_argument('batch')
+    p = sub.add_parser('help'); p.add_argument('batch'); p.add_argument('--worker')
+    p = sub.add_parser('answer'); p.add_argument('batch'); p.add_argument('--worker', required=True)
+    p.add_argument('--text', required=True); p.add_argument('--request-id')
     p = sub.add_parser('recover'); p.add_argument('batch'); p.add_argument('--actions'); p.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     try:
@@ -279,6 +328,10 @@ def main():
             print(json.dumps(dispatch(args.batch, args.method, args.status), indent=2))
         elif args.command == 'monitor':
             print(json.dumps(monitor(args.batch), indent=2))
+        elif args.command == 'help':
+            print(json.dumps(help_requests(args.batch, args.worker), indent=2))
+        elif args.command == 'answer':
+            print(json.dumps(answer(args.batch, args.worker, args.text, args.request_id), indent=2))
         elif args.command == 'recover':
             print(json.dumps(recover(args.batch, args.actions, args.apply), indent=2))
         else:

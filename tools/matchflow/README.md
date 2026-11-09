@@ -70,19 +70,23 @@ start_here first, then status/bands, up to two 500-entry catalog pages, and func
 only for the final shortlist. Responses, notices and relevant local ledger history are
 preserved without scanning source trees. File reports are
 review signals, not automatic evidence of a defect in every function. No claim, source
-hypothesis, lane or clean history is invented. `review.json` is NOT an accepted selection:
-review history, file reports and known local verdicts, annotate evidence and choose lanes
-before preparing the selection below. A raced target is not replaced automatically.
+hypothesis, report scope or clean history is invented. `review.json` is NOT an accepted
+selection: review history, report scope and known local verdicts, annotate evidence and
+prepare the facts-based selection below. A saved draft and a sibling-report count do not
+rank or exclude a target. A raced target is not replaced automatically.
 Do not exhaustively page every band or inspect original game instructions by default.
 Insufficient candidates produce an incomplete review, not more requests in a retry loop.
 
 ```json
-{"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","targets":[{"address":"0x00abcdef","size":160,"state":"open","co_workers":0,"lane":"research","give_ups":4,"open_problem_reports":0,"file_problem_reports":0,"history_reviewed":true,"history_sources":["function_info and saved prior report paths"],"prior_verdicts":[],"verdict_history":"unknown","new_hypothesis":"Named receiver removes the documented duplicate reload","expected_observation":"Receiver reload disappears without changing call order","reason":"Reviewed structural lead; not repeating exhausted sweeps"}]}
+{"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","targets":[{"address":"0x00abcdef","size":160,"state":"open","co_workers":0,"give_ups":4,"open_problem_reports":0,"file_problem_reports":1,"reason":"Reviewed structural lead; not repeating exhausted sweeps","review":{"history_reviewed":true,"history_sources":["function_info and saved prior report paths"],"prior_verdicts":[],"verdict_history":"reviewed","report_scope":"sibling","report_evidence":"Saved report concerns a different function in this file; no shared helper","prior_unfit":false,"next_experiment":"Named receiver removes the documented duplicate reload","integration_plan":null}}]}
 ```
 
-Do not copy the illustrative address or fabricate metadata. Production requires reviewed
-clean verdict history. Three or more give-ups/reports route to research with a concrete
-hypothesis; any prior unfit requires integration. Prepare merges known local verdicts.
+Do not copy the illustrative address or fabricate metadata. There is no mutually exclusive
+lane: record the facts separately. A sibling-only report does not exclude the target. A
+function-scoped or true unit-wide report, three or more give-ups, or a prior unfit requires
+a concrete `next_experiment`; prior unfit also requires an `integration_plan`. `prior_unfit`
+may be true because of verdicts or because you discovered it; `prepare` merges known local
+verdicts. A saved draft is starting material, never a selection preference.
 Status JSON is `{"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","status": ACTUAL_SERVICE_STATUS}`.
 
 ```text
@@ -112,7 +116,9 @@ This is tool-boundary containment, not a separate OS sandbox or protection again
 human changing host files. Other trusted plugins run with host authority.
 
 Operations:
-- `status`: assigned target, measured timing, state and closure marker.
+- `status`: assigned facts, measured remaining experiment time, state, closure marker,
+  near-miss advisory (best valid check at most 40 instructions different) and parent help
+  requests/answers.
 - `read`: `area=files|pack|packet`, `path`, optional one-based `offset`, bounded `limit`.
 - `list`, `search`: files or assigned pack; search is literal and bounded.
 - `write`: relative `path`, `text`; only candidate/source/note files inside `workerNN/files`.
@@ -128,26 +134,44 @@ Operations:
 - `check`: `source`, `stage=baseline|attempt|final`, `change/why/expect`, `observed`
   from check two, and required `regions`. Optional complete comma-separated codegen
   `flags` is allowlisted; include/output/path/compiler-injection options are refused.
+- `permute`: owned `source`, optional `stage=attempt|final`, allowlisted `flags`, bounded
+  `trials` 10..400, `jobs` 1..4 and `timeout_seconds` 60..600. The host copies the exact
+  candidate to a private run directory, invokes the official `--permute` search without a
+  worker-selected path or shell, preserves stdout/stderr and input/output hashes, writes
+  the best source to the worker files area, then runs one ordinary verified check of that
+  source with the supplied notes. Timed-out or STOP-cancelled searches preserve raw
+  output and a `verification_disposition`; they never publish a candidate or start
+  verification. An unconfirmed process-tree stop latches worker cleanup and wakes the
+  parent instead of allowing more experiments.
 - `checks`: own check IDs/metrics/flags and durable snapshot availability, even after STOP.
   Every new check saves the exact input bytes under host-owned external
   `work/matchflow/sources/CLAIM/HASH.cpp` before compiling. Editing a working file cannot
   destroy an earlier source. Old checks without snapshots remain explicitly unavailable.
 - `gate`: `decision`, `reason`, `hypothesis`, `expected`, optional `integration_plan`.
+- `escalate`: `reason`, `need`, bounded `evidence`; records a durable parent request while
+  the claim stays active. The monitor wakes with `worker_help_requested`; the parent answers
+  with `batch.py answer` and the worker reads it in `status help`. It never extends,
+  replaces or closes the claim.
 - `register_wall`: evidence for a register/slot-only wall; does not reset clocks.
 - `promote`: freezes only an unchanged final official MATCH to host-owned `match.cpp`.
 - `close`: `operation=submit|giveup|flag-proof`. Giveup uses `source` OR `check_id` plus `notes` containing
   reason/category/tried/still_differs/suspected_cause, or explicit `no_source_reason`.
-  Notes MUST be a JSON object, not an encoded string. `check_id` selects only an own,
+  Notes MUST be a JSON object, not an encoded string. A voluntary give-up with a near miss
+  also needs `notes.near_miss_review` with `best_check_id`, `tested`, `untried` and
+  `stop_reason`; forced closure and host recovery record it as not required instead of
+  blocking cleanup. `check_id` selects only an own,
   valid checked snapshot, verifies its hash and works after STOP with no edits or compile.
   Flag-proof needs `notes.note`. Submit uses only the host's promoted artifact.
-- `report`: generates a canonical v3 evidence report after closure and acknowledged
-  closing notes. Unclaimed blocked assignments do not require closing notes.
+- `report`: generates a canonical v4 evidence report after closure and acknowledged
+  closing notes; historical v3 reports stay readable under their original schema.
+  Unclaimed blocked assignments do not require closing notes.
 
-The worker does not get a shell to run private scripts or permuter loops. Ask the parent
-for a reviewed additional capability rather than broadening permissions. Scalar timing
-and metrics derive from host/checker records, not worker estimates. Final baseline MATCH
-still needs a continue gate and final check before promotion. No local result proves
-server verification or full-unit compatibility.
+The worker does not get a shell to run private scripts. The only permutation capability is
+the bounded host `permute` operation, not an arbitrary loop. Ask the parent for a reviewed
+additional capability rather than broadening permissions. Scalar timing and metrics derive
+from host/checker records, not worker estimates. Final baseline MATCH still needs a
+continue gate and final check before promotion. No local result proves server verification
+or full-unit compatibility.
 
 ## Closure, failure and audit
 
@@ -169,6 +193,13 @@ inspect exact sessions and reconcile only its owned claims. Completion notices a
 event-driven. OpenCode/plugin restarts never automatically replay work or reset leases.
 After a monitor notification, re-arm `batch.py monitor BATCH` if other workers remain.
 Its durable cursor suppresses already-notified requests but still wakes on escalation.
+A `worker_help_requested` notification is not a closure request: the worker keeps its
+claim and deadlines. List or answer it while the session runs:
+
+```text
+python tools/matchflow/batch.py help BATCH
+python tools/matchflow/batch.py answer BATCH --worker worker01 --text "Bounded answer"
+```
 
 Transport exceptions, invalid responses and ambiguous mutations preserve claim/closure
 reservations. Never relaunch to repair them. HTTP 401, 403 edge rejection/access denial,
@@ -239,10 +270,12 @@ does not prove submission/retention. Non-clean audits exit 2. v1/v2 history stay
 never silently upgraded. Host-only ledger/reclassify/import/usage CLI utilities remain
 available for operator investigation; they are not worker capabilities.
 Report v3 independently validates closing-notes claim/session/phase, post-closure
-timestamps, checkpoint acknowledgement and receipt hash. Historical reports/receipts
-remain untouched and are not relabelled v3 or accepted without the required proof.
-New ordinary reports also include `retained_check`: the check whose hash describes
-`closure-source.cpp`, separate from `latest_valid`. It is null for an unchecked handoff.
+timestamps, checkpoint acknowledgement and receipt hash. New assignments generate report
+v4 with `review` facts, `permute_runs` and `near_miss` instead of a lane; v3 validation is
+retained read-only for historical reports. Historical reports/receipts are never relabelled
+or accepted without the required proof. New ordinary reports also include
+`retained_check`: the check whose hash describes `closure-source.cpp`, separate from
+`latest_valid`. It is null for an unchecked handoff.
 Audits verify this link and any new source snapshot; old reports remain unchanged.
 
 The launcher captures raw child-session usage at completion. Aggregate it with

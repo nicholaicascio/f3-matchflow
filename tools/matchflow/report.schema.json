@@ -1,14 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Generated one-function evidence report v3 with closing-notes receipts",
+  "title": "Generated one-function evidence report v4 with reviewed facts, permutation runs and near-miss review",
   "type": "object",
-  "required": ["schema_version", "address", "claim_id", "session_id", "lane", "model", "variant", "harness", "outcome", "worker_start_utc", "closed_utc", "candidate_path", "source_sha256", "pack_path", "pack_sha256", "checked_flags", "baseline", "final", "latest_valid", "service", "remaining", "elapsed_seconds", "provenance", "closing_notes", "setup_failure"],
+  "required": ["schema_version", "address", "claim_id", "session_id", "review", "selection_review", "model", "variant", "harness", "outcome", "worker_start_utc", "closed_utc", "candidate_path", "source_sha256", "pack_path", "pack_sha256", "checked_flags", "baseline", "final", "latest_valid", "service", "remaining", "elapsed_seconds", "provenance", "closing_notes", "setup_failure", "permute_runs", "near_miss"],
   "properties": {
-    "schema_version": {"const": 3},
+    "schema_version": {"const": 4},
     "address": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
     "claim_id": {"type": ["string", "null"], "pattern": "^clm_[A-Za-z0-9]+$"},
     "session_id": {"type": ["string", "null"], "pattern": "^ses_[A-Za-z0-9]+$"},
-    "lane": {"enum": ["production", "research", "integration"]},
+    "review": {"$ref": "#/$defs/review"},
+    "selection_review": {"$ref": "#/$defs/review"},
     "model": {"type": "string"}, "variant": {"type": "string"}, "harness": {"type": "string"},
     "outcome": {"enum": ["submitted", "flag_review", "given_up", "blocked"]},
     "worker_start_utc": {"type": "string", "format": "date-time"},
@@ -20,10 +21,13 @@
     "checked_flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
     "baseline": {"$ref": "#/$defs/check"}, "final": {"$ref": "#/$defs/check"}, "latest_valid": {"$ref": "#/$defs/check"},
     "retained_check": {"$ref": "#/$defs/check"},
+    "permute_runs": {"type": "array", "items": {"$ref": "#/$defs/permute"}},
+    "near_miss": {"$ref": "#/$defs/near_miss"},
     "service": {
       "type": "object", "required": ["submission_id", "checkpoint_id", "verdict", "acknowledgement_path", "source_retention"],
       "properties": {
         "submission_id": {"type": ["string", "null"]}, "checkpoint_id": {"type": ["string", "null"]},
+        "flag_id": {"type": ["string", "null"]},
         "verdict": {"enum": [null, "verified", "unfit", "failed", "needs_review"]},
         "acknowledgement_path": {"type": ["string", "null"]},
         "source_retention": {"enum": ["retained", "submitted", "failed", "not_applicable", "unknown"]}
@@ -47,6 +51,21 @@
     }
   },
   "$defs": {
+    "review": {
+      "type": "object",
+      "required": ["history_reviewed", "history_sources", "prior_verdicts", "verdict_history", "report_scope", "report_evidence", "prior_unfit", "next_experiment", "integration_plan"],
+      "properties": {
+        "history_reviewed": {"type": "boolean"},
+        "history_sources": {"type": "array", "items": {"type": "string"}},
+        "prior_verdicts": {"type": "array", "items": {"type": "string"}},
+        "verdict_history": {"enum": ["reviewed", "unknown"]},
+        "report_scope": {"enum": ["none", "function", "sibling", "unit", "unknown"]},
+        "report_evidence": {"type": ["string", "null"]},
+        "prior_unfit": {"type": "boolean"},
+        "next_experiment": {"type": ["string", "null"]},
+        "integration_plan": {"type": ["string", "null"]}
+      }
+    },
     "check": {
       "type": ["object", "null"],
       "required": ["check_id", "status", "valid", "extent", "diffs", "ndiff_insn", "checker", "flags", "source_sha256", "pack_sha256", "evidence_path", "metric_semantics", "diagnostic"],
@@ -56,6 +75,61 @@
         "checker": {"type": ["string", "null"]}, "flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
         "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "pack_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "evidence_path": {"type": "string"}, "metric_semantics": {"const": "checker_extent_uninterpreted"}, "diagnostic": {"type": "boolean"}
+      }
+    },
+    "permute": {
+      "type": "object",
+      "required": ["run_id", "record_path", "record_sha256", "raw_sha256", "source_sha256", "output_sha256", "score", "matched", "timed_out", "output_missing", "stopped_mid_run", "termination_unconfirmed", "cleanup_latched", "verification_disposition", "seconds", "trials", "jobs", "flags", "verification_check_id", "verification_error"],
+      "properties": {
+        "run_id": {"type": "string"},
+        "record_path": {"type": "string"},
+        "record_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "raw_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "output_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "score": {"type": ["integer", "null"], "minimum": 0},
+        "matched": {"type": "boolean"},
+        "timed_out": {"type": "boolean"},
+        "output_missing": {"type": "boolean"},
+        "stopped_mid_run": {"type": "boolean"},
+        "termination_unconfirmed": {"type": "boolean"},
+        "cleanup_latched": {"type": "boolean"},
+        "verification_disposition": {"enum": ["verified", "failed", "stopped", "timeout", "termination_unconfirmed", "no_output", "search_failed", "not_run"]},
+        "seconds": {"type": "number", "minimum": 0},
+        "trials": {"type": "integer", "minimum": 1},
+        "jobs": {"type": "integer", "minimum": 1},
+        "flags": {"type": "array", "items": {"type": "string", "pattern": "^/[^, ]+$"}},
+        "verification_check_id": {"type": ["integer", "null"]},
+        "verification_error": {"type": ["string", "null"]}
+      }
+    },
+    "near_miss": {
+      "type": ["object", "null"],
+      "required": ["schema_version", "claim_id", "address", "status", "request", "host", "origin", "remaining_experiment_seconds", "recorded_utc"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "claim_id": {"type": "string", "pattern": "^clm_[A-Za-z0-9]+$"},
+        "address": {"type": "string", "pattern": "^0x[0-9a-f]{8}$"},
+        "status": {"enum": ["accepted", "not_required"]},
+        "request": {"type": ["object", "null"]},
+        "host": {
+          "type": ["object", "null"],
+          "required": ["check_id", "ndiff_insn", "flags", "normal_flags", "source_sha256", "status", "voluntary", "phase"],
+          "properties": {
+            "check_id": {"type": "integer", "minimum": 1},
+            "ndiff_insn": {"type": "integer", "minimum": 0},
+            "flags": {"type": "array", "items": {"type": "string"}},
+            "normal_flags": {"type": "boolean"},
+            "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+            "status": {"type": "string"},
+            "voluntary": {"type": "boolean"},
+            "phase": {"enum": ["experiment", "closure", "reconcile"]}
+          }
+        },
+        "origin": {"enum": ["worker", "recovery", "operator"]},
+        "reason": {"type": "string"},
+        "remaining_experiment_seconds": {"type": "number", "minimum": 0},
+        "recorded_utc": {"type": "string", "format": "date-time"}
       }
     }
   }

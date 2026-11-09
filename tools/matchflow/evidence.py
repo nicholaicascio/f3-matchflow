@@ -8,9 +8,17 @@ import sqlite3
 
 import lifecycle as life
 import matchflow as ledger
+import review
 from service import acknowledgement, closing_notes_record, owned
 
-REPORT_VERSION = 3
+REPORT_VERSION = 4
+LEGACY_REPORT_VERSION = 3
+
+
+def report_schema(version):
+    """New reports use reviewed facts; historical v3 reports keep their lane field."""
+    name = 'report-v3.schema.json' if version == LEGACY_REPORT_VERSION else 'report.schema.json'
+    return life.load(Path(__file__).with_name(name))
 
 
 def schema_errors(value, schema, root=None, path='$'):
@@ -124,19 +132,34 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
     folder = Path(folder)
     state = life.snapshot(folder, worker)
     assignment = life.load(folder / worker / 'assignment.json')
+    target = assignment.get('target', {})
+    has_target = 'review' in target or 'lane' in target
+    facts = review.for_report(target) if has_target else None
+    version = REPORT_VERSION if has_target else LEGACY_REPORT_VERSION
+
+    def base(review_value=None, **extra):
+        value = dict(schema_version=version, address=state['address'], session_id=state['session_id'],
+                     model=assignment['claim_body']['model'],
+                     variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'], **extra)
+        if version == REPORT_VERSION:
+            value.update(review=review_value or facts, selection_review=facts, permute_runs=[],
+                         near_miss=life.load(folder / worker / 'near-miss-review.json')
+                         if (folder / worker / 'near-miss-review.json').is_file() else None)
+        else:
+            value['lane'] = target.get('lane', 'research')
+        return value
+
     if state['state'] != 'closed':
         raise ValueError('closure acknowledgement required before generating a completed report')
     if state.get('outcome') == 'blocked' and state.get('claim_attempted') is False:
-        value = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=None, session_id=state['session_id'],
-                     lane=assignment.get('target', {}).get('lane', 'research'), model=assignment['claim_body']['model'],
-                     variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'], outcome='blocked',
+        value = base(claim_id=None, outcome='blocked',
                      worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
-                     elapsed_seconds=state['elapsed_seconds'],
-                     elapsed_estimated=False, candidate_path=None, source_sha256=None, pack_path=None, pack_sha256=None,
+                     elapsed_seconds=state['elapsed_seconds'], elapsed_estimated=False,
+                     candidate_path=None, source_sha256=None, pack_path=None, pack_sha256=None,
                      checked_flags=[], baseline=None, final=None, latest_valid=None,
-                      service=dict(submission_id=None, checkpoint_id=None, verdict=None, acknowledgement_path=None,
-                                   source_retention='not_applicable'), remaining=[state['blocked_reason']],
-                      setup_failure=None, closing_notes=closing_notes_record(folder, worker, state),
+                     service=dict(submission_id=None, checkpoint_id=None, verdict=None, acknowledgement_path=None,
+                                  source_retention='not_applicable'), remaining=[state['blocked_reason']],
+                     setup_failure=None, closing_notes=closing_notes_record(folder, worker, state),
                      provenance='generated_from_lifecycle_and_ledger')
         life.save(folder / worker / 'report.json', value)
         return value
@@ -146,9 +169,7 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
         row = db.execute('SELECT * FROM attempts WHERE claim_id=?', (state['claim_id'],)).fetchone()
         if row is None:
             failure = setup_failure_record(folder, worker, state, ack, db_path)
-            result = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=state['claim_id'], session_id=state['session_id'],
-                          lane=assignment['target']['lane'], model=assignment['claim_body']['model'],
-                          variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'], outcome='given_up',
+            result = base(claim_id=state['claim_id'], outcome='given_up',
                           worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
                           elapsed_seconds=state['elapsed_seconds'], elapsed_estimated=False,
                           candidate_path=None, source_sha256=None, pack_path=None, pack_sha256=None,
@@ -167,24 +188,28 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
         source_hash = ledger.digest(source) if source.exists() else None
         retained = next((c for c in reversed(checks) if c['valid'] and c['source_hash'] == source_hash), None)
         elapsed = state['elapsed_seconds']
-        result = dict(schema_version=REPORT_VERSION, address=state['address'], claim_id=state['claim_id'],
-                      lane=row['lane'], model=assignment['claim_body']['model'],
-                      variant=assignment['claim_body'].get('effort', ''), harness=assignment['harness'],
-                      outcome=state['outcome'], session_id=state['session_id'],
+        effective = dict(facts or {})
+        if row['review_json']:
+            effective.update(json.loads(row['review_json']))
+        result = base(review_value=effective, claim_id=state['claim_id'], outcome=state['outcome'],
                       worker_start_utc=state['worker_start_utc'], closed_utc=state['closed_utc'],
                       elapsed_seconds=elapsed, elapsed_estimated=False,
                       candidate_path=str(source) if source.exists() else None,
-                       source_sha256=source_hash,
+                      source_sha256=source_hash,
                       pack_path=row['pack_path'], pack_sha256=row['pack_hash'],
                       baseline=check_record(db, baseline), final=check_record(db, final),
-                       latest_valid=check_record(db, latest),
-                       retained_check=check_record(db, retained),
+                      latest_valid=check_record(db, latest),
+                      retained_check=check_record(db, retained),
                       checked_flags=json.loads(latest['flags_json']) if latest else [],
-                      service=dict(submission_id=ack['response'].get('submission_id'), checkpoint_id=ack.get('checkpoint_id'),
+                      service=dict(submission_id=ack['response'].get('submission_id'),
+                                   checkpoint_id=ack.get('checkpoint_id'),
                                    flag_id=ack['response'].get('flag_id'),
                                    verdict=None, acknowledgement_path=state['service_ack_path'],
                                    source_retention=state['handoff']),
                       remaining=[], provenance='generated_from_lifecycle_and_ledger')
+        if version == REPORT_VERSION:
+            result['permute_runs'] = [{k: v for k, v in item.items() if k != 'record'}
+                                      for item in ledger.permute_runs(db, state['claim_id'])]
         result.update(closing_notes=notes, setup_failure=None)
         life.save(folder / worker / 'report.json', result)
     return result
@@ -229,6 +254,167 @@ def validate_check(item, claim, pack_hash, folder, errors, db_path, stage):
         errors.append('check evidence: ' + str(exc))
 
 
+def validate_permutations(value, claim, address, folder, worker, db_path, errors):
+    """Reported permutation summaries must match durable events and exact hashes.
+
+    The event summary is not trusted on its own: its run record is hash-bound,
+    canonically located, required to carry every identity/hash/result field, and
+    rechecked against the verification check and the report's pack.
+    """
+    runs = value.get('permute_runs')
+    if runs is None:
+        return
+    if not isinstance(runs, list):
+        errors.append('permute_runs must be a list')
+        return
+    with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        stored = ledger.permute_runs(db, claim)
+    expected = [{k: v for k, v in item.items() if k != 'record'} for item in stored]
+    if runs != expected:
+        errors.append('permutation summaries differ from durable ledger events')
+    base = (Path(folder) / worker / 'permute').resolve()
+    required = ('run_id', 'claim_id', 'address', 'created_utc', 'seconds', 'timed_out',
+                'stopped_mid_run', 'termination_unconfirmed', 'cleanup_latched', 'exit_code', 'trials', 'jobs',
+                'flags', 'normal_flags', 'source_path', 'source_sha256', 'output_path',
+                'output_sha256', 'usable_path', 'output_missing', 'score', 'matched',
+                'verification_disposition', 'verification', 'verification_error',
+                'raw_path', 'raw_sha256')
+    for item, source in zip(runs, stored):
+        record = source.get('record')
+        record_path = Path(item.get('record_path', '')).resolve()
+        if base not in record_path.parents or record_path.name != 'run.json':
+            errors.append('permutation record is outside its canonical run directory')
+            continue
+        if not record_path.is_file() or ledger.digest(record_path) != item.get('record_sha256'):
+            errors.append('permutation record hash changed or is missing')
+            continue
+        if not isinstance(record, dict):
+            errors.append('permutation run record is missing')
+            continue
+        if any(key not in record for key in required):
+            errors.append('permutation run record lacks required fields')
+            continue
+        if record.get('claim_id') != claim or record.get('address') != address:
+            errors.append('permutation run identity differs from assignment')
+            continue
+        try:
+            if not (life.timestamp(value['worker_start_utc']) <= life.timestamp(record['created_utc']) <=
+                    life.timestamp(value['closed_utc'])):
+                errors.append('permutation run timestamp is outside the assignment lifetime')
+        except (ValueError, KeyError, TypeError):
+            errors.append('permutation run timestamp is invalid')
+        for key in ('run_id', 'source_sha256', 'output_sha256', 'score', 'matched',
+                    'timed_out', 'stopped_mid_run', 'termination_unconfirmed', 'cleanup_latched',
+                    'output_missing', 'verification_disposition', 'raw_sha256',
+                    'seconds', 'trials', 'jobs', 'flags'):
+            if item.get(key) != record.get(key):
+                errors.append('permutation summary differs from record: ' + key)
+        if item.get('verification_check_id') != (record.get('verification') or {}).get('check_id'):
+            errors.append('permutation verification check ID differs from record')
+        if item.get('verification_error') != record.get('verification_error'):
+            errors.append('permutation verification error differs from record')
+        for key, digest_key in (('source_path', 'source_sha256'), ('output_path', 'output_sha256'),
+                                ('raw_path', 'raw_sha256')):
+            path = record.get(key)
+            if not path:
+                continue
+            try:
+                candidate = Path(path).resolve()
+                if base not in candidate.parents or not candidate.is_file():
+                    errors.append('permutation artifact is outside its run directory: ' + key)
+                elif digest_key and ledger.digest(candidate) != record.get(digest_key):
+                    errors.append('permutation artifact hash changed: ' + key)
+            except OSError:
+                errors.append('permutation artifact unavailable: ' + key)
+        verification = record.get('verification')
+        if verification:
+            check_id = verification.get('check_id')
+            with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+                db.row_factory = sqlite3.Row
+                row = db.execute('SELECT * FROM checks WHERE id=? AND claim_id=?',
+                                 (check_id, claim)).fetchone()
+            if not row:
+                errors.append('permutation verification check is missing')
+            elif record.get('verification_disposition') == 'verified':
+                if not row['valid']:
+                    errors.append('permutation verification check is invalid')
+                else:
+                    if record.get('output_sha256') and row['source_hash'] != record['output_sha256']:
+                        errors.append('permutation verification source differs from its output')
+                    if record.get('flags') is not None and json.loads(row['flags_json']) != record['flags']:
+                        errors.append('permutation verification flags differ from its record')
+                    if value.get('pack_sha256') and row['pack_hash'] != value['pack_sha256']:
+                        errors.append('permutation verification pack differs from the report')
+        elif record.get('verification_error'):
+            if record.get('verification_disposition') != 'failed':
+                errors.append('permutation verification error disposition is not failed')
+        else:
+            disposition = record.get('verification_disposition')
+            allowed = ('stopped', 'timeout', 'termination_unconfirmed', 'no_output', 'search_failed')
+            if disposition not in allowed:
+                errors.append('permutation record has neither verification nor a failure disposition')
+            if disposition == 'timeout' and not record.get('timed_out'):
+                errors.append('permutation disposition timeout contradicts its flags')
+            if disposition == 'stopped' and not record.get('stopped_mid_run'):
+                errors.append('permutation disposition stopped contradicts its flags')
+            if disposition == 'termination_unconfirmed' and not record.get('termination_unconfirmed'):
+                errors.append('permutation disposition termination_unconfirmed contradicts its flags')
+            if disposition == 'no_output' and not record.get('output_missing'):
+                errors.append('permutation disposition no_output contradicts its flags')
+            if disposition == 'search_failed' and record.get('exit_code') in (0, 1):
+                errors.append('permutation disposition search_failed contradicts its exit code')
+        if (record.get('verification') and record.get('verification_error') is None and
+                record.get('verification_disposition') != 'verified'):
+            errors.append('permutation verification disposition is not verified')
+        if record.get('verification_error') and record.get('verification_disposition') != 'failed':
+            errors.append('permutation verification error disposition is not failed')
+
+
+def validate_near_miss(value, claim, address, folder, worker, db_path, errors):
+    path = Path(folder) / worker / 'near-miss-review.json'
+    expected = life.load(path) if path.is_file() else None
+    with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        stored = ledger.near_miss_review(db, claim)
+        near = ledger.near_miss(db, claim)
+    if value.get('near_miss') != expected or expected != stored:
+        errors.append('near-miss review differs from the durable ledger/event record')
+    if not expected:
+        if value.get('outcome') == 'given_up' and near:
+            errors.append('near-miss give-up lacks the required review record')
+        return
+    if expected.get('claim_id') != claim or expected.get('address') != address:
+        errors.append('near-miss review identity differs from assignment')
+    host = expected.get('host')
+    if near is None:
+        if host is not None:
+            errors.append('near-miss review invents host facts with no valid near miss')
+    elif not isinstance(host, dict) or any(host.get(k) != near.get(k) for k in (
+            'check_id', 'ndiff_insn', 'flags', 'normal_flags', 'source_sha256', 'status')):
+        errors.append('near-miss review host facts differ from the best valid check')
+    try:
+        start = life.timestamp(value['worker_start_utc'])
+        end = life.timestamp(value['closed_utc'])
+        recorded = life.timestamp(expected['recorded_utc'])
+        if not start <= recorded <= end:
+            errors.append('near-miss review timestamp is outside the assignment lifetime')
+    except (ValueError, KeyError, TypeError):
+        errors.append('near-miss review timestamp is invalid')
+    if expected.get('status') == 'accepted':
+        request = expected.get('request')
+        if (not isinstance(request, dict) or not isinstance(host, dict) or near is None or
+                request.get('best_check_id') != near.get('check_id') or
+                expected.get('origin') != 'worker' or host.get('voluntary') is not True or
+                host.get('phase') != 'experiment'):
+            errors.append('accepted near-miss review is internally inconsistent')
+    elif expected.get('status') == 'not_required':
+        if near is not None and host and host.get('voluntary') is True and expected.get('origin') == 'worker':
+            errors.append('voluntary near-miss give-up was recorded as not requiring review')
+    else:
+        errors.append('near-miss review has an unsupported status')
+
+
 def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
     folder = Path(folder)
     worker = folder / task['id']
@@ -238,10 +424,19 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
     if state.get('outcome') == 'blocked' and state.get('claim_attempted') is False and not claim:
         try:
             value = life.load(worker / 'report.json')
-            errors += schema_errors(value, life.load(Path(__file__).with_name('report.schema.json')))
+            errors += schema_errors(value, report_schema(value.get('schema_version')))
             if (value.get('outcome') != 'blocked' or value.get('address') != task['address'] or
                     value.get('claim_id') is not None or state['address'] != task['address']):
                 errors.append('blocked report differs from unclaimed assignment')
+            if value.get('schema_version') == REPORT_VERSION:
+                assignment_value = life.load(worker / 'assignment.json')
+                target = assignment_value.get('target', {})
+                if 'review' not in target and 'lane' not in target:
+                    errors.append('blocked v4 report lacks reviewed or legacy assignment facts')
+                else:
+                    selection = review.for_report(target)
+                    if (value.get('review') != selection or value.get('selection_review') != selection):
+                        errors.append('blocked report review facts differ from assignment')
             if value.get('closing_notes') != closing_notes_record(folder, task['id'], state):
                 errors.append('blocked closing notes state differs from unclaimed assignment')
             if not life.timestamp(state['worker_start_utc']) <= life.timestamp(state['closed_utc']) <= life.utc():
@@ -305,12 +500,34 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
         errors.append(str(exc))
     try:
         value = life.load(worker / 'report.json')
-        schema = life.load(Path(__file__).with_name('report.schema.json'))
+        schema = report_schema(value.get('schema_version'))
         violations = schema_errors(value, schema)
         if violations:
             raise ValueError('; '.join(violations))
         if value['claim_id'] != claim or value['address'] != task['address']:
             raise ValueError('report assignment mismatch')
+        assignment_value = life.load(worker / 'assignment.json')
+        if value.get('schema_version') == REPORT_VERSION:
+            target = assignment_value.get('target', {})
+            if 'review' not in target and 'lane' not in target:
+                errors.append('v4 report lacks reviewed or legacy assignment facts')
+            else:
+                selection = review.for_report(target)
+                if value.get('selection_review') != selection:
+                    errors.append('report selection facts differ from assignment')
+                effective = dict(selection)
+                with closing(sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=ro', uri=True)) as review_db:
+                    review_db.row_factory = sqlite3.Row
+                    columns = {r[1] for r in review_db.execute('PRAGMA table_info(attempts)')}
+                    stored_row = (review_db.execute('SELECT review_json FROM attempts WHERE claim_id=?',
+                                                    (claim,)).fetchone()
+                                  if 'review_json' in columns else None)
+                if stored_row and stored_row['review_json']:
+                    effective.update(json.loads(stored_row['review_json']))
+                if value.get('review') != effective:
+                    errors.append('report effective review differs from the ledger')
+        elif 'review' in assignment_value.get('target', {}):
+            errors.append('new reviewed assignment produced a legacy report')
         if value['session_id'] != session:
             errors.append('report session differs from lifecycle')
         expected_model = task['model'].split('#')[0]
@@ -339,6 +556,9 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
                 errors.append('setup failure invents source/pack/check/submission evidence')
             return dict(lease_closure=lease, evidence_integrity='invalid' if errors else 'valid',
                         source_handoff=handoff, verification=verification, evidence_errors=errors)
+        if value.get('schema_version') == REPORT_VERSION:
+            validate_near_miss(value, claim, task['address'], folder, task['id'], db_path, errors)
+            validate_permutations(value, claim, task['address'], folder, task['id'], db_path, errors)
         if value['provenance'] != 'generated_from_lifecycle_and_ledger':
             errors.append('ordinary attempt requires ledger provenance')
         pack = resolve(value['pack_path'], worker)

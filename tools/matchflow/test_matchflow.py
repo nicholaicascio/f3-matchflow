@@ -30,10 +30,15 @@ class WorkflowTests(unittest.TestCase):
     def write_pack(self):
         (self.pack / "pack.json").write_text(json.dumps(self.metadata))
 
-    def register(self, lane="production"):
+    def register(self, prior_unfit=False):
         return m.register(self.db, argparse.Namespace(
             deadline="2099-01-01T00:00:00Z", pack=str(self.pack),
-            address="0x00123456", claim=self.claim, lane=lane,
+            address="0x00123456", claim=self.claim,
+            review=dict(history_reviewed=True, history_sources=['fixture'], prior_verdicts=[],
+                        verdict_history='reviewed', report_scope='none', report_evidence=None,
+                        prior_unfit=prior_unfit,
+                        next_experiment=None if not prior_unfit else 'Repair the full-unit type clash',
+                        integration_plan=None if not prior_unfit else 'Repair the full-unit type clash'),
             model="Test Model", variant="max", harness="Offline Test"))
 
     def check(self, status="wip", stage="baseline", extra=None, exit_code=None, stderr=""):
@@ -64,14 +69,15 @@ class WorkflowTests(unittest.TestCase):
         return m.record(self.db, argparse.Namespace(claim=self.claim, kind=kind,
                         identifier=identifier, checkpoint=checkpoint, note="test"))
 
-    def test_rubric_not_size_or_miss_count(self):
+    def test_rubric_records_facts_not_a_lane(self):
         item = {"address": "00123456", "state": "open", "size": 2000,
                 "near_misses": 9, "history_reviewed": True}
-        self.assertEqual(m.classify(item)["lane"], "production")
+        self.assertNotIn("lane", m.classify(item))
+        self.assertEqual(m.classify(item)["review"]["report_scope"], "unknown")
         item["give_ups"] = 3
-        self.assertEqual(m.classify(item)["lane"], "research")
+        self.assertIn("Repeated attempts", m.classify(item)["reasons"][0])
         item["prior_verdicts"] = ["unfit"]
-        self.assertEqual(m.classify(item)["lane"], "integration")
+        self.assertTrue(m.classify(item)["review"]["prior_unfit"])
 
     def test_rubric_requires_review_and_availability(self):
         item = {"address": "00123456", "state": "open"}
@@ -103,10 +109,10 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "hypothesis"):
             self.gate(hypothesis=None)
 
-    def test_integration_gate_requires_specific_plan(self):
-        self.register("integration")
+    def test_prior_unfit_gate_requires_specific_plan(self):
+        self.register(prior_unfit=True)
         self.check()
-        with self.assertRaisesRegex(ValueError, "integration"):
+        with self.assertRaisesRegex(ValueError, "integration plan"):
             self.gate()
         self.gate(integration_plan="obtain full unit error and compare affected neighbour")
 

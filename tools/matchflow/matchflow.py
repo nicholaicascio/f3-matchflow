@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -12,8 +13,11 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import flags as flagset
 import lifecycle
+import review
 from config import workspace_root, REPOSITORY
+from security import scoped
 
 ROOT = workspace_root()
 DEFAULT_DB = ROOT / "work" / "matchflow" / "ledger.sqlite3"
@@ -70,31 +74,35 @@ def accepted_sets(pack):
 
 
 def classify(item):
-    """A conservative rubric, not a prediction that a function will match."""
+    """Reviewed facts, not a lane and not a prediction that a function will match."""
     reasons = []
     verdicts = item.get("prior_verdicts", [])
     if isinstance(verdicts, str):
         raise ValueError("prior_verdicts must be a list")
-    if "unfit" in verdicts or item.get("integration_failure"):
-        lane = "integration"
+    prior_unfit = "unfit" in verdicts or bool(item.get("integration_failure"))
+    if prior_unfit:
         reasons.append("Prior integration failure: local MATCH does not settle file compatibility.")
-    elif (item.get("flags_suspected") or item.get("repeated_blocker")
-          or item.get("give_ups", 0) >= 3
-          or item.get("open_problem_reports", 0) or item.get("file_problem_reports", 0)):
-        lane = "research"
-        reasons.append("Repeated attempts, suspected metadata defect, or an unresolved report.")
-    else:
-        lane = "production"
-        reasons.append("No supplied integration/repeated-blocker evidence; baseline is still required.")
+    if (item.get("flags_suspected") or item.get("repeated_blocker") or
+            item.get("give_ups", 0) >= 3 or item.get("open_problem_reports", 0)):
+        reasons.append("Repeated attempts or an unresolved report on this function.")
+    if item.get("file_problem_reports", 0):
+        reasons.append("Reports exist on sibling functions; scope is unknown until reviewed.")
     if item.get("near_misses", 0):
-        reasons.append("Near misses are starting material, not a readiness score.")
+        reasons.append("Near misses are starting material, not a selection preference.")
     if not item.get("history_reviewed", False):
         reasons.append("History has not been reviewed: do not dispatch yet.")
     state = item.get("state", "unknown")
     eligible = state == "open" and bool(item.get("history_reviewed"))
     if state != "open":
         reasons.append(f"Availability is {state!r}; refresh before any claim.")
-    return {"address": address(item["address"]), "lane": lane,
+    review = dict(history_reviewed=bool(item.get("history_reviewed")),
+                  prior_verdicts=list(verdicts), verdict_history=item.get("verdict_history", "unknown"),
+                  report_scope=item.get("report_scope", "unknown"),
+                  report_evidence=item.get("report_evidence"),
+                  prior_unfit=prior_unfit,
+                  next_experiment=item.get("next_experiment"),
+                  integration_plan=item.get("integration_plan"))
+    return {"address": address(item["address"]), "review": review,
             "dispatch_ready": eligible, "reasons": reasons,
             "size": item.get("size"), "source_file": item.get("source_file")}
 
@@ -139,8 +147,14 @@ def connect(path):
             verdict TEXT, detail TEXT, observed TEXT NOT NULL, snapshot_hash TEXT NOT NULL
         );
     """)
-    if 'assignment_path' not in {r[1] for r in db.execute('PRAGMA table_info(attempts)')}:
+    attempt_columns = {r[1] for r in db.execute('PRAGMA table_info(attempts)')}
+    if 'assignment_path' not in attempt_columns:
         db.execute('ALTER TABLE attempts ADD COLUMN assignment_path TEXT')
+        db.commit()
+    if 'review_json' not in attempt_columns:
+        # `lane` stays for historical rows/reports.  New attempts record the facts
+        # that justified the assignment; no mutually exclusive lane is written.
+        db.execute('ALTER TABLE attempts ADD COLUMN review_json TEXT')
         db.commit()
     if 'source_snapshot_path' not in {r[1] for r in db.execute('PRAGMA table_info(checks)')}:
         db.execute('ALTER TABLE checks ADD COLUMN source_snapshot_path TEXT')
@@ -187,10 +201,26 @@ def register(db, args):
         state = lifecycle.snapshot(assignment.parent.parent, assignment.parent.name)
         if state['claim_id'] != args.claim or state['address'] != addr or state['state'] != 'claimed':
             raise ValueError('assignment does not own this claim')
+    facts = getattr(args, 'review', None)
+    if isinstance(facts, str):
+        try:
+            facts = json.loads(facts)
+        except ValueError:
+            raise ValueError('review facts must be a JSON object') from None
+    if facts is None:
+        raise ValueError('reviewed facts are required; a lane is not an assignment')
+    if not isinstance(facts, dict):
+        raise ValueError('review facts must be an object')
+    facts = review.normalized(dict(review=facts, give_ups=getattr(args, 'give_ups', 0),
+                                   open_problem_reports=getattr(args, 'open_problem_reports', 0)),
+                              strict=False)
     with db:
-        db.execute("""INSERT INTO attempts(claim_id,address,lane,model,variant,harness,
-            pack_path,pack_hash,deadline,created) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                   (args.claim, addr, args.lane, args.model, args.variant, args.harness,
+        # The historical lane column is not an active rule; keep it empty for new
+        # attempts and store the reviewed facts separately.
+        db.execute("""INSERT INTO attempts(claim_id,address,lane,review_json,model,variant,harness,
+            pack_path,pack_hash,deadline,created) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                   (args.claim, addr, '', json.dumps(facts) if facts is not None else None,
+                    args.model, args.variant, args.harness,
                     str(pack_path), tree_digest(pack_path), deadline.isoformat(), now()))
         event(db, args.claim, "registered", {"ownership_confirmed_by_operator": True})
         if assignment:
@@ -349,6 +379,313 @@ def check(db, args):
             "seconds": round(elapsed, 2), "evidence": str(evidence_path)}
 
 
+def best_scored_check(db, claim):
+    """Best valid same-process metric, with its exact flags and source hash."""
+    rows = db.execute("SELECT * FROM checks WHERE claim_id=? AND valid=1 ORDER BY id", (claim,)).fetchall()
+    scored = []
+    for row in rows:
+        result = json.loads(row["result_json"])
+        ndiff = result.get("ndiff_insn")
+        if type(ndiff) is int and ndiff >= 0:
+            scored.append((ndiff, -row["id"], row, result))
+    if not scored:
+        return None
+    ndiff, _, row, result = min(scored)
+    return dict(check_id=row["id"], ndiff_insn=ndiff, stage=row["stage"],
+                flags=json.loads(row["flags_json"]), normal_flags=bool(result.get("normal_flags")),
+                source_sha256=row["source_hash"], status=result.get("status"))
+
+
+def near_miss(db, claim):
+    """A close residual is advisory for the next experiment and required review."""
+    best = best_scored_check(db, claim)
+    return best if best and best["ndiff_insn"] <= review.NEAR_MISS_DIFFS else None
+
+
+def permute_runs(db, claim):
+    """Durable bounded permutation runs, separate from ordinary checker checks."""
+    value = []
+    for row in db.execute("SELECT payload FROM events WHERE claim_id=? AND kind='permute' ORDER BY id", (claim,)):
+        item = json.loads(row["payload"])
+        path = Path(item.get("record_path", ""))
+        try:
+            record = load(path)
+        except (OSError, ValueError):
+            record = None
+        value.append(dict(item, record=record))
+    return value
+
+
+def near_miss_review(db, claim):
+    """The last host-recorded near-miss review for this claim, if any."""
+    row = db.execute("SELECT payload FROM events WHERE claim_id=? AND kind='near_miss_review' "
+                     "ORDER BY id DESC LIMIT 1", (claim,)).fetchone()
+    return json.loads(row["payload"]) if row else None
+
+
+def _permute_score(stdout):
+    if re.search(r"^MATCH: written to ", stdout, re.M):
+        return 0, True
+    match = re.search(r"NO MATCH YET: best score (\d+)", stdout)
+    return (int(match.group(1)), False) if match else (None, False)
+
+
+def permute(db, args):
+    """Run the official bounded permuter, then verify its best source once.
+
+    The permuter is a host capability, not a shell: the worker supplies only an
+    owned candidate path and bounded integers.  Inputs are copied to a host-owned
+    run directory, stdout/stderr and hashes are retained, and the best source is
+    rechecked through the ordinary official-check path before it can be used.
+    """
+    row = attempt(db, args.claim)
+    ensure_active(row)
+    assigned = Path(row["assignment_path"]) if row.get("assignment_path") else None
+    if assigned:
+        folder, worker = assigned.parent.parent, assigned.parent.name
+        state = lifecycle.snapshot(folder, worker)
+        if state["claim_id"] != args.claim or state["state"] != "claimed":
+            raise ValueError("lifecycle does not own an active claim")
+        lifecycle.require_experiment(folder, worker)
+    else:
+        folder = worker = state = None
+    if row["gate"] != "continue":
+        raise ValueError("record a baseline and a continue gate before a permutation search")
+    baseline = db.execute("SELECT 1 FROM checks WHERE claim_id=? AND stage='baseline' AND valid=1 LIMIT 1",
+                          (args.claim,)).fetchone()
+    if not baseline:
+        raise ValueError("a valid recorded baseline is required")
+    pack_path = Path(row["pack_path"])
+    pack_hash = tree_digest(pack_path)
+    if pack_hash != row["pack_hash"]:
+        raise ValueError("pack inputs changed since registration; obtain/review the correct pack")
+    source = Path(args.source).resolve()
+    if assigned:
+        files = (folder / worker / "files").resolve()
+        try:
+            relative = source.relative_to(files)
+        except ValueError:
+            raise ValueError("permutation source must be inside this worker's files") from None
+        source = scoped(folder / worker / "files", relative.as_posix(), exists=True)
+    if source.suffix.lower() != ".cpp":
+        raise ValueError("C++ source required")
+    options = flagset.permutation(dict(trials=args.trials, jobs=args.jobs,
+                                       timeout_seconds=args.timeout_seconds))
+    requested = flags(args.flags)
+    if requested is not None:
+        flagset.alternate(args.flags)
+    pack = load(pack_path / "pack.json")
+    used = requested or list(pack["flags"])
+    remaining = lifecycle.remaining_experiment_seconds(state) if state else None
+    if remaining is not None and remaining < 90:
+        raise ValueError("less than 90 seconds of experiment time remain; no new permutation search")
+    timeout = options["timeout_seconds"]
+    if remaining is not None:
+        timeout = int(min(timeout, max(60, remaining - 30)))
+    source_bytes = source.read_bytes()
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    evidence = Path(args.evidence_dir or DEFAULT_DB.parent / "checks")
+    runs = (folder / worker / "permute") if assigned else (DEFAULT_DB.parent / "permute" / args.claim)
+    run_id = "run-" + time.strftime("%Y%m%dT%H%M%S", time.gmtime()) + "-" + lifecycle.uuid.uuid4().hex[:8]
+    run_dir = runs / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    candidate = run_dir / "candidate.cpp"
+    candidate.write_bytes(source_bytes)
+    from checker import command
+    cancel = run_dir / "CANCEL"
+    cmd = command(["--pack", wsl_path(pack_path), "--permute",
+                   "--trials", str(options["trials"]), "--jobs", str(options["jobs"])],
+                  wall_seconds=timeout, watch_file=cancel)
+    if requested:
+        cmd += ["--flags", ",".join(requested)]
+    cmd += [wsl_path(candidate)]
+    stdout_path = run_dir / "stdout.txt"
+    stderr_path = run_dir / "stderr.txt"
+    started = time.monotonic()
+    timed_out = stopped_mid = termination_unconfirmed = False
+    stdout = stderr = ""
+    returncode = -1
+    process = None
+    try:
+        # Hash/copy/command preparation can take a moment; STOP may have arrived.
+        if assigned:
+            lifecycle.require_experiment(folder, worker)
+        # Drain to host-owned files, never pipes: a full pipe would stall a healthy
+        # search while the supervisor waits for the process to exit.
+        with stdout_path.open("wb") as out, stderr_path.open("wb") as err:
+            process = subprocess.Popen(cmd, stdout=out, stderr=err)
+            deadline = started + timeout
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                if assigned:
+                    try:
+                        current = lifecycle.snapshot(folder, worker)
+                        if not lifecycle.voluntary_experiment(folder, worker, current):
+                            stopped_mid = True
+                            break
+                    except (ValueError, KeyError, OSError, sqlite3.Error):
+                        stopped_mid = True
+                        break
+                time.sleep(0.25)
+            if timed_out or stopped_mid:
+                # The WSL runner watches this marker and kills its own process group.
+                cancel.touch()
+                for _ in range(12):
+                    if process.poll() is not None:
+                        break
+                    time.sleep(0.25)
+                if process.poll() is None:
+                    # The WSL runner did not honour its own cancellation marker in time.
+                    # Treat the tree stop as unconfirmed even if killing wsl.exe succeeds.
+                    termination_unconfirmed = True
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if termination_unconfirmed and os.name == "nt":
+                    try:
+                        subprocess.run(["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                                       capture_output=True, timeout=10)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                termination_unconfirmed = True
+                process.kill()
+        stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        returncode = process.returncode
+        if Path(str(cancel) + '.unconfirmed').exists():
+            termination_unconfirmed = True
+    except OSError as exc:
+        stderr = str(exc)
+        for path, name in ((stdout_path, 'stdout'), (stderr_path, 'stderr')):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ''
+            if name == 'stdout':
+                stdout = text
+            else:
+                stderr = text
+    cleanup_latched = False
+    if termination_unconfirmed and assigned:
+        try:
+            if lifecycle.snapshot(folder, worker)['state'] == 'claimed':
+                lifecycle.request_worker_cleanup(folder, worker, 'permuter_termination_unconfirmed')
+                cleanup_latched = True
+        except (ValueError, KeyError, OSError, sqlite3.Error):
+            pass
+    elapsed = time.monotonic() - started
+    score, matched = _permute_score(stdout)
+    output = candidate.with_name(candidate.stem + ".permuted.cpp")
+    usable = None
+    if output.is_file() and not timed_out and not stopped_mid and not termination_unconfirmed:
+        if assigned:
+            try:
+                lifecycle.require_experiment(folder, worker)
+            except ValueError:
+                stopped_mid = True
+        if not stopped_mid:
+            data = output.read_bytes()
+            if assigned:
+                relative = "permuted-%s.cpp" % run_id[-8:]
+                usable = scoped(folder / worker / "files", relative)
+                usable.write_bytes(data)
+            else:
+                usable = output
+    verification, verification_error = None, None
+    if usable is not None and not timed_out and not stopped_mid and not termination_unconfirmed:
+        try:
+            if assigned:
+                lifecycle.require_experiment(folder, worker)
+            vargs = argparse.Namespace(
+                claim=args.claim, source=str(usable), stage=args.stage, flags=args.flags,
+                evidence_dir=str(evidence), import_evidence=None,
+                change="official permuter best candidate (%s diffs); %s"
+                       % (score, args.change or 'search best source'),
+                observed=args.observed, why=args.why, expect=args.expect, regions=args.regions)
+            verification = check(db, vargs)
+        except ValueError as exc:
+            verification_error = str(exc)
+    if verification and verification.get('valid') is not True:
+        verification_error = verification_error or 'verification check was not valid evidence'
+    record_path = run_dir / "run.json"
+    raw_path = run_dir / "raw.json"
+    raw = dict(command=cmd, stdout=stdout[:1024 * 1024], stderr=stderr[:65536],
+               exit_code=returncode, seconds=elapsed, captured_utc=now(),
+               timed_out=timed_out, stopped_mid_run=stopped_mid,
+               termination_unconfirmed=termination_unconfirmed)
+    raw_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    output_missing = (not output.is_file()) and not timed_out and not stopped_mid and returncode in (0, 1)
+    disposition = ('termination_unconfirmed' if termination_unconfirmed else
+                   'verified' if verification and verification.get('valid') is True else
+                   'failed' if verification_error else
+                   'stopped' if stopped_mid else
+                   'timeout' if timed_out else
+                   'no_output' if output_missing else
+                   'search_failed' if returncode not in (0, 1) else 'not_run')
+    record = dict(schema_version=1, run_id=run_id, claim_id=args.claim, address=row["address"],
+                  created_utc=now(), seconds=round(elapsed, 2), timed_out=timed_out,
+                  stopped_mid_run=stopped_mid, termination_unconfirmed=termination_unconfirmed,
+                  cleanup_latched=cleanup_latched,
+                  exit_code=returncode, trials=options["trials"], jobs=options["jobs"],
+                  flags=used, normal_flags=any(same_flags(used, f) for f in accepted_sets(pack)),
+                  source_path=str(candidate), source_sha256=source_hash,
+                  output_path=str(output) if output.is_file() else None,
+                  output_sha256=digest(output) if output.is_file() else None,
+                  usable_path=str(usable) if usable else None,
+                  output_missing=output_missing,
+                  verification_disposition=disposition,
+                  score=score, matched=bool(matched), verification=verification,
+                  verification_error=verification_error, raw_path=str(raw_path),
+                  raw_sha256=digest(raw_path))
+    lifecycle.save(record_path, record)
+    record_sha256 = digest(record_path)
+    summary = dict(run_id=run_id, record_path=str(record_path), record_sha256=record_sha256,
+                   source_sha256=source_hash,
+                   output_sha256=record["output_sha256"], score=score, matched=bool(matched),
+                   timed_out=timed_out, stopped_mid_run=stopped_mid,
+                   termination_unconfirmed=termination_unconfirmed,
+                   cleanup_latched=cleanup_latched,
+                   seconds=record["seconds"], trials=options["trials"],
+                   jobs=options["jobs"], flags=used, output_missing=output_missing,
+                   verification_disposition=disposition,
+                   raw_sha256=record["raw_sha256"],
+                   verification_check_id=(verification or {}).get("check_id"),
+                   verification_error=verification_error)
+    with db:
+        event(db, args.claim, "permute", summary)
+    if termination_unconfirmed:
+        raise ValueError("permutation process termination could not be confirmed; cleanup required, "
+                         "evidence preserved")
+    if stopped_mid:
+        raise ValueError("permutation search stopped by STOP/deadline/supervisor loss; "
+                         "evidence preserved, no candidate published")
+    if timed_out:
+        raise ValueError("official permuter exceeded its bounded wall clock (best score %s); "
+                         "evidence preserved, no verification" % score)
+    if returncode not in (0, 1) and not matched:
+        raise ValueError("official permuter failed; inspect retained host evidence, do not retry blindly")
+    if output_missing:
+        raise ValueError("official permuter produced no candidate; evidence preserved, do not retry blindly")
+    if verification_error:
+        stopping = any(token in verification_error for token in (
+            'STOP', 'closure', 'experiment time', 'watchdog', 'active claim',
+            'deadline has passed', 'cleanup barrier'))
+        if not stopping:
+            raise ValueError('permutation verification failed: %s; evidence preserved' % verification_error)
+    return dict(**summary, output=str(usable) if usable else None, verification=verification)
+
+
 def gate(db, args):
     row = attempt(db, args.claim)
     ensure_active(row)
@@ -359,8 +696,9 @@ def gate(db, args):
     if args.decision == "continue":
         if not args.hypothesis or not args.expected:
             raise ValueError("continue needs a testable hypothesis and expected observation")
-        if row["lane"] == "integration" and not args.integration_plan:
-            raise ValueError("integration lane needs a plan for the prior full-unit failure")
+        facts = json.loads(row["review_json"]) if row.get("review_json") else {}
+        if (facts.get("prior_unfit") or row["lane"] == "integration") and not args.integration_plan:
+            raise ValueError("prior full-unit failure needs a concrete integration plan")
     payload = {"decision": args.decision, "reason": args.reason,
                "hypothesis": args.hypothesis, "expected": args.expected,
                "integration_plan": args.integration_plan, "baseline_id": baseline["id"]}
@@ -441,11 +779,14 @@ def reclassify(db, args):
     ensure_active(row)
     if not args.integration_plan.strip():
         raise ValueError('integration plan required for discovered unfit history')
+    facts = json.loads(row["review_json"]) if row.get("review_json") else {}
+    facts.update(prior_unfit=True, integration_plan=args.integration_plan)
     with db:
-        db.execute("UPDATE attempts SET lane='integration', gate=NULL, state='baseline_needed' WHERE claim_id=?",
-                   (args.claim,))
-        event(db, args.claim, 'reclassified', dict(lane='integration', integration_plan=args.integration_plan))
-    return dict(lane='integration', gate=None, note='Record a new integration gate before further checks or promotion.')
+        db.execute("UPDATE attempts SET review_json=?, gate=NULL, state='baseline_needed' WHERE claim_id=?",
+                   (json.dumps(facts), args.claim))
+        event(db, args.claim, 'reclassified', dict(review=facts))
+    return dict(review=facts, gate=None,
+                note='Record a new gate with the integration plan before further checks or promotion.')
 
 
 def import_reports(db, args):
@@ -517,7 +858,7 @@ def parser():
     a = sub.add_parser("register", help="register a claim you already own")
     for name in ("claim", "address", "model", "variant", "harness", "pack", "deadline"):
         a.add_argument("--" + name, required=True)
-    a.add_argument("--lane", choices=["production", "research", "integration"], required=True)
+    a.add_argument("--review", required=True, help="JSON reviewed facts; no mutually exclusive lane")
     a.add_argument('--assignment', help='managed worker assignment.json; enforce shared lifecycle deadlines')
     a = sub.add_parser("check", help="run official f3check via WSL and capture immutable evidence")
     a.add_argument("--claim", required=True)
@@ -528,6 +869,17 @@ def parser():
     a.add_argument('--import-evidence', help='import an exact invocation with hashes, raw output and measured duration')
     for name in ("change", "observed", "why", "expect", "regions"):
         a.add_argument("--" + name, help="service work-notes field forwarded to f3check")
+    a = sub.add_parser("permute", help="bounded official permuter, then one verified check of its best source")
+    a.add_argument("--claim", required=True)
+    a.add_argument("--source", required=True)
+    a.add_argument("--stage", choices=["attempt", "final"], default="attempt")
+    a.add_argument("--flags")
+    a.add_argument("--trials", type=int, default=120)
+    a.add_argument("--jobs", type=int, default=2)
+    a.add_argument("--timeout-seconds", type=int, default=240)
+    a.add_argument("--evidence-dir")
+    for name in ("change", "observed", "why", "expect", "regions"):
+        a.add_argument("--" + name, help="service work-notes field forwarded to the verification check")
     a = sub.add_parser('reclassify', help='orchestrator: route discovered unfit history to integration and invalidate gate')
     a.add_argument('--claim', required=True); a.add_argument('--integration-plan', required=True)
     a = sub.add_parser("gate")
@@ -561,7 +913,7 @@ def main():
         else:
             db = connect(args.db)
             try:
-                commands = {"register": register, "check": check, "gate": gate,
+                commands = {"register": register, "check": check, "permute": permute, "gate": gate,
                             "promote": promote, "record": record,
                              "import-reports": import_reports, "import-status": import_status, 'reclassify': reclassify}
                 result = summary(db) if args.command == "summary" else commands[args.command](db, args)

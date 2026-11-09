@@ -3,8 +3,16 @@ import { invoke, launch, workerContext } from './core.mjs';
 
 const script = fileURLToPath(new URL('../../tools/matchflow/broker.py', import.meta.url));
 const object = { type: 'object', additionalProperties: true, properties: {
-  notes: { type: 'object', additionalProperties: false, properties: Object.fromEntries(
-    ['reason', 'category', 'tried', 'still_differs', 'suspected_cause', 'note'].map(key => [key, { type: 'string' }])) },
+  notes: { type: 'object', additionalProperties: false, properties: {
+    ...Object.fromEntries(['reason', 'category', 'tried', 'still_differs', 'suspected_cause', 'note']
+      .map(key => [key, { type: 'string' }])),
+    near_miss_review: { type: 'object', additionalProperties: false, properties: {
+      best_check_id: { type: 'integer', minimum: 1 },
+      tested: { type: 'string' },
+      untried: { type: 'string' },
+      stop_reason: { type: 'string' },
+    }, required: ['best_check_id', 'tested', 'untried', 'stop_reason'] },
+  } },
   check_id: { type: 'integer', minimum: 1 },
   no_source_reason: { type: 'string', minLength: 1 },
 } };
@@ -36,7 +44,7 @@ const plugin = {
       });
       editor.add({
         name: 'matchflow_worker',
-        description: 'Session-scoped matching tools. op: status, target(offset,limit; own assigned function only, private local inspection), read(area=files|pack|packet,path,offset,limit), list/search(area,text), write(path,text), reference(name=policy|recipe|compiler_tips|large_functions|upstream_tips|fnv), twin, check(source,stage,change,why,expect,observed,regions,flags), checks (own IDs, metrics and snapshot availability), gate(decision,reason,hypothesis,expected,integration_plan), register_wall(evidence), promote, checkpoint(phase,note), close(operation,source OR check_id,notes OBJECT with reason/category/tried/still_differs/suspected_cause,no_source_reason), report. check_id selects an own checked giveup snapshot and works after STOP without compiling or editing. Paths are relative. No shell, claims, replacement targets or arbitrary URLs.',
+        description: 'Session-scoped matching tools. op: status (also measured remaining time, near-miss advisory and parent help), target(offset,limit; own assigned function only, private local inspection), read(area=files|pack|packet,path,offset,limit), list/search(area,text), write(path,text), reference(name=policy|recipe|compiler_tips|large_functions|upstream_tips|fnv), twin, check(source,stage,change,why,expect,observed,regions,flags), permute(source,stage,trials,jobs,timeout_seconds,flags,change,why,expect,observed,regions; bounded official permuter then one verified check), checks (own IDs, metrics and snapshot availability), gate(decision,reason,hypothesis,expected,integration_plan), register_wall(evidence), escalate(reason,need,evidence; asks the parent while the claim stays active), promote, checkpoint(phase,note), close(operation,source OR check_id,notes OBJECT with reason/category/tried/still_differs/suspected_cause and near_miss_review {best_check_id,tested,untried,stop_reason} for a voluntary near-miss give-up,no_source_reason), report. check_id selects an own checked giveup snapshot and works after STOP without compiling or editing. Paths are relative. No shell, claims, replacement targets or arbitrary URLs.',
         input: { type: 'object', properties: { op: { type: 'string' }, data: object },
           required: ['op'], additionalProperties: false },
         options: { codemode: false },

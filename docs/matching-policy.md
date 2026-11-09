@@ -11,11 +11,17 @@ The external workspace stores official dependencies and private runtime artifact
   Screen without claims. Review availability, ownership, reports, substantive history,
   known verdicts and exclusions. Never fabricate service metadata.
 - One exact address per assignment, no bands, co-work, replacements, reclaims or refills.
-  Production requires reviewed clean history; recurring
-  blockers need research with a concrete new hypothesis; prior unfit requires integration.
+  Record reviewed facts, not a mutually exclusive lane: history and verdict confidence,
+  report scope (function, sibling-only, unit-wide or unknown), prior unfit and the next
+  experiment. A sibling report does not exclude an otherwise good target; a report on the
+  assigned function, a true unit-wide defect or a prior unfit does change the requirements.
+  Prior unfit needs a concrete integration plan; recurring blockers need a next experiment.
+- A saved draft is never a selection preference by itself. It is starting material after
+  the function is chosen on reviewed history, report scope and a concrete lead. The same
+  applies to a near-miss count: it is not a readiness score.
 - Default worker model remains opencode-go/deepseek-v4.1-flash#max; honor explicit human
   overrides. Record actual model, variant, harness and usage, never guessed billing.
-- Prepare fresh v3 selections and fresh successful online preflight. Dispatch subagents,
+- Prepare fresh v3 assignments with review facts and fresh successful online preflight. Dispatch subagents,
   then use matchflow_launch for each exact prepared worker. Its trusted host claims just
   before work, validates ownership, obtains the exact pack and registers evidence.
 - Only dedicated match-worker sessions with deny-by-default scoped tools may match.
@@ -38,6 +44,13 @@ The external workspace stores official dependencies and private runtime artifact
 - Official checker only, exact claim pack, full work notes on every attempt. Record a
   baseline, then a concrete hypothesis gate. One experiment at a time; first difference
   first. Never falsify checker output or promote unproven imported results.
+- A near miss may use the bounded official permuter through the host. The host accepts
+  only an owned candidate, allowlisted flags and bounded trials/jobs/timeout, preserves
+  input and output hashes, and rechecks the best source once with the ordinary checker.
+  It is a managed capability, not a shell or an unrestricted source sweep.
+- If the next useful experiment needs an unavailable capability, use the host escalation
+  request while the claim is active. The parent monitor is notified; the claim, pack and
+  deadlines do not change. Continue useful work or read the answer in status help.
 - Preserve pack inputs. Diagnostic flags may prove a defect only with an exact MATCH.
   Never submit an unaccepted-flags MATCH as an ordinary contribution.
 
@@ -58,6 +71,12 @@ The external workspace stores official dependencies and private runtime artifact
 - Final official MATCH plus unchanged source/pack/flags permits promotion and submission.
   Alternate-flags proof uses source-bearing checkpoint plus flag-proof. Otherwise give
   up with exact best C++ and category/tried/still_differs/suspected_cause/reason.
+- A voluntary give-up with a near miss (best valid check at most 40 instructions
+  different) also needs a near-miss review: the best check ID, what was tested, what
+  concrete experiment remains untried (or "none"), and why stopping now is justified.
+  If experiment time and a concrete lead remain, test the lead first. Deadlines, STOP,
+  supervisor loss and host recovery are forced closures: they record the review as not
+  required and are never blocked by missing model prose.
 - Do not retry ambiguous mutations. Save durable responses, reconcile read-only, and
   escalate cleanup_required. HTTP 429/503 stops new starts, preserves Retry-After, no loops.
 - After closure save required closing notes and generate the canonical report. Parent

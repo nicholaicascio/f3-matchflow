@@ -30,6 +30,21 @@ class RunLessonsTests(unittest.TestCase):
         self.assertEqual(cmd[-1], note)
         self.assertNotIn('-c', cmd)
 
+    def test_bounded_checker_options_precede_the_argv_boundary(self):
+        cmd = checker.command(['--pack', '/tmp/pack', '--permute'],
+                              wall_seconds=60, watch_file='C:/tmp/cancel')
+        self.assertIn('--wall-seconds', cmd)
+        self.assertIn('60', cmd)
+        self.assertIn('--watch-file', cmd)
+        self.assertLess(cmd.index('--wall-seconds'), cmd.index('--'))
+        import check_runner
+        args, remaining = check_runner.parse_invocation([
+            '--runtime-json', '{}', '--key-file', 'k', '--wall-seconds', '60',
+            '--watch-file', '/tmp/cancel', '--', '--pack', 'p'])
+        self.assertEqual(args.wall_seconds, 60)
+        self.assertEqual(args.watch_file, '/tmp/cancel')
+        self.assertEqual(remaining, ['--pack', 'p'])
+
     def test_bad_notes_rejected_before_network_or_closure_reservation(self):
         self.owned_fixture()
         for notes in ('{"reason":"encoded"}', ['not an object'], 42):

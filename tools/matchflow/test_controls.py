@@ -1,5 +1,6 @@
 """Regression fixtures contain no private game data. All network calls are fake."""
 import argparse
+from contextlib import closing
 from datetime import timedelta
 import json
 from pathlib import Path
@@ -14,6 +15,10 @@ import lifecycle as life
 import matchflow as m
 import service
 import usage
+
+REVIEW = dict(history_reviewed=True, history_sources=['fixture'], prior_verdicts=[],
+              verdict_history='reviewed', report_scope='none', report_evidence=None,
+              prior_unfit=False, next_experiment=None, integration_plan=None)
 
 
 class Controls(unittest.TestCase):
@@ -261,7 +266,7 @@ class Controls(unittest.TestCase):
         db_path = self.root/'ledger.sqlite3'
         db = m.connect(db_path)
         try:
-            m.register(db, argparse.Namespace(claim='clm_fixture', address=self.task['address'], lane='production',
+            m.register(db, argparse.Namespace(claim='clm_fixture', address=self.task['address'], review=REVIEW,
                        model='test/model', variant='max', harness='Offline Test', pack=str(pack),
                        deadline=life.stamp(life.utc()+timedelta(hours=2)), assignment=str(self.root/self.worker/'assignment.json')))
             result = dict(status='match', diffs=0, ndiff_insn=0, extent=10,
@@ -300,6 +305,37 @@ class Controls(unittest.TestCase):
         life.save(self.root/self.worker/'report.json', generated)
         self.assertEqual(evidence.audit_worker(self.root, self.task, state, status, db_path)['evidence_integrity'], 'invalid')
 
+    def test_report_effective_review_records_discovered_reclassification(self):
+        self.assignment['target'] = dict(
+            address=self.task['address'], size=10, lane='research', give_ups=1,
+            open_problem_reports=0, file_problem_reports=0, history_reviewed=True,
+            history_sources=['legacy fixture'], prior_verdicts=[], verdict_history='reviewed',
+            new_hypothesis=None)
+        life.save(self.root/self.worker/'assignment.json', self.assignment)
+        db_path = self.promoted()
+        with closing(m.connect(db_path)) as db, db:
+            row = m.attempt(db, 'clm_fixture')
+            facts = json.loads(row['review_json'])
+            facts.update(prior_unfit=True,
+                         integration_plan='repair the named unit type clash',
+                         next_experiment='recheck the repaired unit')
+            db.execute('UPDATE attempts SET review_json=? WHERE claim_id=?',
+                       (json.dumps(facts), 'clm_fixture'))
+        def api(tool, body):
+            if tool == 'submit':
+                return dict(submission_id='sub_fixture')
+            return self.api(tool, body)
+        service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        service.closing_notes(self.root, self.worker, 'Discovered unit history recorded.',
+                              api=lambda tool, body: dict(checkpoint_id='chk_notes_fixture'))
+        generated = evidence.report(self.root, self.worker, db_path)
+        self.assertTrue(generated['review']['prior_unfit'])
+        self.assertFalse(generated['selection_review']['prior_unfit'])
+        audited = evidence.audit_worker(self.root, self.task, life.snapshot(self.root, self.worker),
+                                        dict(open_claims=[], recent=[dict(id='sub_fixture', addr=self.task['address'],
+                                                                          verdict='verified')]), db_path)
+        self.assertEqual(audited['evidence_errors'], [])
+
     def test_alternate_flags_follow_checkpoint_and_flag_proof_route(self):
         db_path = self.promoted(diagnostic=True)
         calls = []
@@ -331,7 +367,7 @@ class Controls(unittest.TestCase):
         db = m.connect(db_path)
         try:
             m.reclassify(db, argparse.Namespace(claim='clm_fixture', integration_plan='repair a concrete unit type conflict'))
-            self.assertEqual(m.attempt(db, 'clm_fixture')['lane'], 'integration')
+            self.assertTrue(json.loads(m.attempt(db, 'clm_fixture')['review_json'])['prior_unfit'])
             with self.assertRaisesRegex(ValueError, 'submit_ready'):
                 service.submit_artifact(db, 'clm_fixture')
         finally:
@@ -420,7 +456,7 @@ class Controls(unittest.TestCase):
         db = m.connect(self.root/'ledger.sqlite3')
         try:
             with self.assertRaisesRegex(ValueError, 'earlier pack'):
-                m.register(db, argparse.Namespace(claim='clm_fixture', address=self.task['address'], lane='production',
+                m.register(db, argparse.Namespace(claim='clm_fixture', address=self.task['address'], review=REVIEW,
                            model='test/model', variant='max', harness='Offline Test', pack=str(old),
                            deadline=life.stamp(life.utc()+timedelta(hours=2)),
                            assignment=str(self.root/self.worker/'assignment.json')))

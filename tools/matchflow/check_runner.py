@@ -12,6 +12,8 @@ def parse_invocation(argv):
     parser.add_argument('--runtime-json', required=True)
     parser.add_argument('--key-file', required=True)
     parser.add_argument('--mode', choices=['check', 'preflight'], default='check')
+    parser.add_argument('--wall-seconds', type=int)
+    parser.add_argument('--watch-file', help='host-created cancellation marker for a bounded search')
     if '--' not in argv:
         parser.error('trusted runner options require an explicit -- boundary')
     boundary = argv.index('--')
@@ -20,8 +22,53 @@ def parse_invocation(argv):
     return args, argv[boundary+1:]
 
 
+def bounded(args):
+    """Make a bounded search kill its own process group on timeout or STOP.
+
+    subprocess timeout on the Windows side only kills wsl.exe.  This runs inside
+    WSL and terminates the checker, its compiler descendants and the permuter
+    threads together, so no compilation continues after the bound is reached.
+    """
+    if args.wall_seconds is None and not args.watch_file:
+        return
+    import signal
+    import threading
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
+    def terminate():
+        try:
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        except OSError:
+            # The host treats this marker as an unconfirmed process-tree stop.
+            try:
+                if args.watch_file:
+                    with open(args.watch_file + '.unconfirmed', 'w', encoding='utf-8') as output:
+                        output.write('process-group termination failed')
+            except OSError:
+                pass
+        os._exit(124)
+
+    if args.wall_seconds is not None:
+        if args.wall_seconds <= 0:
+            raise ValueError('wall seconds must be positive')
+        signal.signal(signal.SIGALRM, lambda *_: terminate())
+        signal.alarm(args.wall_seconds)
+    if args.watch_file:
+        def watch():
+            while True:
+                if os.path.exists(args.watch_file):
+                    terminate()
+                import time
+                time.sleep(0.5)
+        threading.Thread(target=watch, daemon=True).start()
+
+
 def main():
     args, remaining = parse_invocation(sys.argv[1:])
+    bounded(args)
     config = json.loads(args.runtime_json)
     checker = Path(config['checker'])
     required = [checker, checker.with_name('msvc9.py'),
