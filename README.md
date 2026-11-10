@@ -75,10 +75,17 @@ put private runtime data in the checkout.
   `requested` 1..50 and `backlog` 1..4 (default 2), validates the resolved model, starts
   the watchdog and binds a restricted `match-discovery` producer. Immediately start
   `python tools/matchflow/batch.py monitor BATCH` as a background host command.
+- Before opening a stream or dispatching workers, run a fresh successful online
+  preflight (`python tools/matchflow/preflight.py --online`). It verifies the workspace,
+  toolchain/image, service connection and notes transport, and fingerprints the matching
+  configuration. The host refuses launch if the result is stale or the fingerprint no
+  longer matches. See [the orchestration runbook](docs/orchestrating.md).
 - The producer reviews bounded catalog evidence through `matchflow_discovery`; the
   host validates each reviewed exact target, reserves a task, claims it and queues the
-  acknowledgement. `matchflow_stream` next consumes one FIFO acknowledged claim and
-  launches its bound `match-worker` without claiming again. Status is read-only.
+  acknowledgement. Discovery may read only OpenCode's saved oversized tool results
+  (`~/.local/share/opencode/tool-output/`), not workspace files or credentials.
+  `matchflow_stream` next consumes one FIFO acknowledged claim and launches its bound
+  `match-worker` without claiming again. Status is read-only.
 - Streaming keeps an immutable `batch.json` header plus append-only `stream_tasks`;
   `lifecycle.manifest` provides their combined view. Producer completion counts claims
   acknowledged, not workers launched or closed. No replacements or mutation retries.
@@ -94,7 +101,10 @@ put private runtime data in the checkout.
   checks, notes and own-claim closure. No shell, credentials, sibling access or selection.
 
 The existing reviewed prepare/dispatch/`matchflow_launch` path remains available.
-Streaming startup failures require STOP and explicit reconciliation, not replacement.
+If streaming discovery fails or its supervision is lost, the requested run is cancelled:
+reconcile that run's durable claims and workers, report the blocker, and do not fall back
+to manual screening, a prepared batch or another stream. The host blocks stream opens and
+prepared launches from that parent session; a new request starts in a new session.
 Configuration, tooling and shared inputs stay frozen during runs; isolated new assignments
 and receipts may be written while workers run. See the runbook for streaming bounds and
 the distinction between producer, consumer and closure completion.
