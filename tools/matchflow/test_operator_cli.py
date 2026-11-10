@@ -98,6 +98,36 @@ class OperatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Refresh service metadata'):
             cli.reviewed_selection(self.screen, self.annotations())
 
+    def test_nested_ownership_screen_to_prepared_assignment_preserves_raw_evidence(self):
+        folder = self.root/'nested-screen'
+        info = dict(self.info, band='<=255', failed_verifications=0, regions=dict(co_workers=0))
+        del info['co_workers']
+        def api(tool, body):
+            if tool == 'list_bands':
+                return dict(bands=[dict(band='<=255', allowed=True, open=1)])
+            if tool == 'list_functions':
+                return dict(functions=[info], next=None)
+            if tool == 'function_info':
+                return info
+            if tool in ('start_here', 'status'):
+                return dict(open_claims=[])
+            raise AssertionError('unexpected mutation '+tool)
+        self.assertEqual(screen.screen(folder, count=1, api=api)['count'], 1)
+        receipt_path = folder/'info-01.json'
+        original = receipt_path.read_bytes()
+        self.assertEqual(life.load(receipt_path)['response'], info)
+        self.assertEqual(life.load(folder/'review.json')['shortlist'][0]['metadata'], info)
+        result = cli.reviewed_selection(folder, self.annotations())
+        self.assertEqual(result['checked_at'], life.load(receipt_path)['checked_at'])
+        self.assertEqual(result['evidence'][0]['sha256'], ledger.digest(receipt_path))
+        selection = cli.write_new('nested-selection.json', result)
+        with patch.object(cli.batch, 'ROOT', self.root), patch.object(cli.batch, 'BATCHES', self.root/'work/batches'):
+            prepared = cli.batch.prepare('nested-fixture', selection['path'])
+        assignment = life.load(Path(prepared['batch'])/'worker01/assignment.json')
+        self.assertEqual(assignment['target']['co_workers'], 0)
+        self.assertEqual(receipt_path.read_bytes(), original)
+        self.assertNotIn('co_workers', info)
+
     def test_selection_rejects_duplicates_missing_evidence_metadata_and_review_overrides(self):
         annotations = self.annotations()
         annotations['targets'] *= 2

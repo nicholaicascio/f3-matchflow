@@ -9,6 +9,7 @@ from transport import ServiceError, request
 
 import lifecycle as life
 import matchflow as ledger
+from function_info import co_workers
 
 
 def owned(status, claim, address):
@@ -28,7 +29,7 @@ def claim(folder, worker, api=request):
         raise ValueError('claim body differs from dispatched address/model/claim policy')
     info = api('function_info', {'address': state['address']})
     if (info.get('address') != state['address'] or info.get('state') != 'open' or
-            info.get('co_workers', 0) or (info.get('regions') or {}).get('co_workers', 0)):
+            co_workers(info)):
         life.blocked(folder, worker, 'fixed target unavailable; no replacement or claim made')
         return dict(outcome='blocked', claim_id=None, address=state['address'])
     # Spend the one-attempt reservation BEFORE the network mutation. A crash or

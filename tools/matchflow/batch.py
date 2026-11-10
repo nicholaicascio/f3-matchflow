@@ -12,6 +12,7 @@ import uuid
 
 import lifecycle
 import review
+from function_info import co_workers
 from config import workspace_root, worker_model, DEFAULT_WORKER_MODEL
 
 ROOT = workspace_root()
@@ -45,9 +46,13 @@ def validate_selection(selection):
         raise ValueError('Orchestrator must select at least one address')
     seen = set()
     for target in targets:
-        if not {'address', 'size', 'state', 'co_workers', 'give_ups',
-                'open_problem_reports', 'file_problem_reports', 'reason'} <= target.keys():
-            raise ValueError('Selection is missing current function_info fields or review annotations')
+        missing = {'address', 'size', 'state', 'give_ups',
+                   'open_problem_reports', 'file_problem_reports', 'reason'} - target.keys()
+        if missing:
+            raise ValueError('Selection %s missing required fields: %s' % (
+                target.get('address', '<unknown>'), ', '.join(sorted(missing))))
+        # Normalize only this selection, never the saved service receipt.
+        target['co_workers'] = co_workers(target)
         address = target['address']
         if not re.fullmatch(r'0x[0-9a-f]{8}', address) or address in seen:
             raise ValueError('Use unique canonical 0x addresses, not bands')

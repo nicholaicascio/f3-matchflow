@@ -59,6 +59,25 @@ class BatchTests(unittest.TestCase):
             file_problem_reports=1))
         self.assertEqual(targets[0]['review']['report_scope'], 'sibling')
 
+    def test_selection_normalizes_nested_ownership(self):
+        data = self.selection(regions=dict(co_workers=0))
+        del data['targets'][0]['co_workers']
+        self.assertEqual(batch.validate_selection(data)[0]['co_workers'], 0)
+
+    def test_selection_missing_fields_error_names_each_field(self):
+        data = self.selection()
+        for field in ('size', 'reason', 'file_problem_reports'):
+            del data['targets'][0][field]
+        with self.assertRaisesRegex(ValueError,
+                '0x00123456 missing required fields: file_problem_reports, reason, size'):
+            batch.validate_selection(data)
+
+    def test_selection_rejects_nested_holder(self):
+        data = self.selection(regions=dict(co_workers=1))
+        del data['targets'][0]['co_workers']
+        with self.assertRaisesRegex(ValueError, 'unheld'):
+            batch.validate_selection(data)
+
     def test_file_reports_need_a_reviewed_scope_not_a_silent_none(self):
         with self.assertRaisesRegex(ValueError, 'file reports'):
             batch.validate_selection(self.selection(file_problem_reports=1))

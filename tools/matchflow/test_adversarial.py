@@ -61,7 +61,7 @@ class ReviewRegressions(unittest.TestCase):
             return dict(limits=dict(claims=20), open_claims=[dict(claim_id='clm_fixture', address='0x00123456',
                 this_key=True, expires=life.stamp(life.utc()+life.timedelta(hours=1)))] if getattr(self, 'remote_claimed', False) else [])
         if tool == 'function_info':
-            return dict(state='open', address=body['address'])
+            return dict(state='open', address=body['address'], co_workers=0)
         if tool == 'claim':
             self.remote_claimed = True
             return dict(claim_id='clm_fixture', work_notes='light')

@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from config import workspace_root
+from function_info import co_workers
 import lifecycle as life
 from security import private_root
 from transport import request, ServiceError
@@ -76,7 +77,7 @@ def screen(output, count=8, max_size=1023, max_pages=2, order='give_ups', api=re
     for i, candidate in enumerate(ranked[:count], 1):
         info = read('function_info', dict(address=candidate['address']), 'info-%02d.json' % i)
         if (info.get('address') != candidate['address'] or info.get('state') != 'open' or
-                info.get('co_workers') != 0 or info.get('open_problem_reports') != 0 or
+                co_workers(info) != 0 or info.get('open_problem_reports') != 0 or
                 info.get('failed_verifications') != 0 or type(info.get('size')) is not int or info['size'] > max_size):
             continue
         shortlist.append(dict(metadata=info, local_history=local_history(output.parent/'ledger.sqlite3', info['address']),

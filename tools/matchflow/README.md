@@ -178,6 +178,12 @@ may be true because of verdicts or because you discovered it; `prepare` merges k
 verdicts. A saved draft is starting material, never a selection preference.
 Status JSON is `{"checked_at":"CURRENT_UTC_ISO_TIMESTAMP","status": ACTUAL_SERVICE_STATUS}`.
 
+Ownership checks accept `function_info.co_workers` or `function_info.regions.co_workers`.
+Both must agree if present; absent, malformed or conflicting counts fail closed, never
+defaulting to zero. Selections normalize the count to top-level `co_workers`; saved
+service receipts and their original timestamps/hashes remain unchanged. This applies to
+streaming, screening/preparation and the final pre-claim availability check.
+
 ### Supported preparation helpers (no temporary Python scripts)
 
 `operator_cli.py` is orchestrator-only. It never claims, compiles, launches workers or

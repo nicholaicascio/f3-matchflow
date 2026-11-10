@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from copy import deepcopy
 from datetime import timedelta
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -224,6 +225,46 @@ class StreamingTests(unittest.TestCase):
             self.discover('enqueue', self.review())
         self.assertEqual(self.api.count('claim'), 1)
         self.assertEqual(len(life.manifest(self.folder)['tasks']), 1)
+
+    def test_enqueue_accepts_both_ownership_locations_without_rewriting_receipts(self):
+        self.open(requested=3, backlog=4)
+        self.discover('catalog')
+        for i, shape in enumerate(('flat', 'nested', 'both')):
+            address = '0x%08x' % (0x00123456+i)
+            info = self.api.info(address)
+            if shape != 'flat':
+                info['regions'] = dict(count=9, co_workers=0)
+            if shape == 'nested':
+                del info['co_workers']
+            self.api.info_overrides[address] = info
+            receipt = self.discover('inspect', dict(address=address))
+            result = self.discover('enqueue', self.review(address))
+            assignment = life.load(self.folder/result['worker']/'assignment.json')
+            self.assertEqual(assignment['target']['co_workers'], 0)
+            with life.transaction(self.folder) as db:
+                saved = db.execute('SELECT payload FROM stream_info WHERE address=?', (address,)).fetchone()[0]
+            self.assertEqual(json.loads(saved), receipt)
+            self.assertEqual(receipt['response'], info)
+        self.assertEqual(self.api.count('claim'), 3)
+        self.assertEqual(self.discover('status')['producer_state'], 'done')
+
+    def test_unsafe_ownership_fails_before_reservation_or_claim(self):
+        self.open()
+        self.discover('catalog')
+        cases = [({}, 'missing co_workers'),
+                 (dict(co_workers=0, regions=dict(co_workers=1)), 'conflicting'),
+                 (dict(regions=dict(co_workers=False)), 'nonnegative integer'),
+                 (dict(regions=dict(co_workers=1)), 'unheld')]
+        for fields, error in cases:
+            info = self.api.info('0x00123456')
+            del info['co_workers']
+            info.update(fields)
+            self.api.info_overrides['0x00123456'] = info
+            self.discover('inspect', dict(address='0x00123456'))
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, error):
+                self.discover('enqueue', self.review())
+            self.assertEqual(self.api.count('claim'), 0)
+            self.assertEqual(life.manifest(self.folder)['tasks'], [])
 
     def test_lost_claim_response_leaves_cleanup_barrier_and_never_retries(self):
         self.open()

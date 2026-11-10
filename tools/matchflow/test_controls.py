@@ -185,6 +185,20 @@ class Controls(unittest.TestCase):
         self.assertEqual(result['claim_id'], 'clm_fixture')
         self.assertTrue((self.root/self.worker/'ownership.json').exists())
 
+    def test_gateway_rejects_unsafe_fresh_ownership_before_reserving_claim(self):
+        for fields in ({}, dict(co_workers=None), dict(regions=dict(co_workers=False)),
+                       dict(co_workers=0, regions=dict(co_workers=1))):
+            calls = []
+            def api(tool, body):
+                calls.append(tool)
+                self.assertEqual(tool, 'function_info')
+                return dict(state='open', address=body['address'], **fields)
+            before = life.snapshot(self.root, self.worker)
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'co_workers'):
+                service.claim(self.root, self.worker, api)
+            self.assertEqual(calls, ['function_info'])
+            self.assertEqual(life.snapshot(self.root, self.worker), before)
+
     def test_ambiguous_transport_consumes_claim_reservation(self):
         def api(tool, body):
             if tool == 'claim':
