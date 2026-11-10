@@ -104,7 +104,8 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
             raise ValueError('unassigned recovery requires explicit no-source reason; no candidate exists')
         if action.get('source') and 'check_id' in action:
             raise ValueError('choose source OR check_id, not both')
-        if state['state'] == 'close_pending' and not (folder/worker/'service-ack.json').exists():
+        if (state['state'] == 'close_pending' and not (folder/worker/'service-ack.json').exists()
+                and not (state.get('closure_operation') == 'submit' and (folder/worker/'submit-error.json').exists())):
             raise ValueError('pending closure has no receipt; reconcile without retry')
         try:
             service.closing_notes_record(folder, worker, state)
@@ -117,7 +118,7 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
                 raise ValueError('reviewed closing_note exceeds service note limit')
         if action['operation'] == 'giveup' and state['state'] not in ('claimed', 'close_pending', 'closed'):
             raise ValueError('resolve pending claim ownership manually before recovery')
-        if action['operation'] == 'giveup' and state['state'] == 'claimed':
+        if action['operation'] == 'giveup' and state['state'] in ('claimed', 'close_pending'):
             notes = action.get('notes')
             if not isinstance(notes, dict) or not all(isinstance(notes.get(k), str) and notes[k].strip()
                     for k in ('reason', 'category', 'tried', 'still_differs', 'suspected_cause')):

@@ -391,7 +391,7 @@ def claimed(folder, worker, claim, address, deadline):
     return state
 
 
-def begin_close(folder, worker, require_help_read=False):
+def begin_close(folder, worker, require_help_read=False, operation=None):
     with transaction(folder) as db:
         state = read_worker(db, worker)
         if state['state'] != 'claimed' or not state['claim_id']:
@@ -409,6 +409,7 @@ def begin_close(folder, worker, require_help_read=False):
             if any(r['request_id'] not in seen for r in answers):
                 raise ValueError('unread parent help: read status.help then help_ack before voluntary closure')
         state['state'] = 'close_pending'
+        state['closure_operation'] = operation
         write_worker(db, worker, state)
     return state
 

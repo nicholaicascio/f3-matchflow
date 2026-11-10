@@ -45,6 +45,11 @@ and stop_reason. Name one concrete untried experiment, or say "none" and why. If
 time remains and a concrete lead is untried, test it first; if a real blocker prevents that,
 say so. Do not invent a review after a deadline, STOP or host cleanup.
 Never retry ambiguous mutations. Report cleanup_required immediately on failure.
+If close(submit) returns submission_rejected=prior_unfit, the host has already
+given up with your exact checked source retained: it was byte-exact but previously
+unfit for project-file integration, and nothing was submitted. Do not retry submit,
+giveup, edit or compile. Save substantive closing notes describing the integration
+blocker, then report. Unknown 409s and transport failures remain reconciliation cases.
 If unfit history is discovered, ask the parent to reclassify before further work.
 Giveup notes MUST be an object with string fields reason, category, tried, still_differs,
 suspected_cause, never an encoded JSON string. Use checks to inspect own check IDs and

@@ -319,6 +319,180 @@ class Controls(unittest.TestCase):
         life.save(self.root/self.worker/'report.json', generated)
         self.assertEqual(evidence.audit_worker(self.root, self.task, state, status, db_path)['evidence_integrity'], 'invalid')
 
+    def rejection(self, **changes):
+        message = ('function 0x00123456: this exact code was already found unfit '
+                   '(it matches the pack but not the project file): PRIVATE_DETAIL. '
+                   'Nothing was submitted (no strike). Change the code so it fits the file.')
+        args = dict(code=409, response_body=json.dumps(dict(error=message)).encode())
+        args.update(changes)
+        return service.ServiceError(**args)
+
+    def test_prior_unfit_is_closed_once_with_source_notes_report_and_clean_audit(self):
+        db_path = self.promoted()
+        calls = []
+        def api(tool, body):
+            calls.append(tool)
+            if tool == 'submit':
+                raise self.rejection()
+            if tool == 'giveup':
+                self.assertEqual(body['best_code'], 'void f() {}')
+                return dict(released=True, best_code='best_code kept: fixture')
+            return self.api(tool, body)
+        result = service.close(self.root, self.worker, 'submit', db_path=db_path, api=api, origin='worker')
+        self.assertEqual(calls, ['status', 'submit', 'status', 'status', 'giveup'])
+        self.assertEqual(result['assessment']['submission_rejected'], 'prior_unfit')
+        self.assertNotIn('PRIVATE_DETAIL', json.dumps(result))
+        self.assertIn('PRIVATE_DETAIL', (self.root/self.worker/'submit-error.json').read_text())
+        self.assertFalse((self.root/'STOP').exists())
+        with life.transaction(self.root) as db:
+            control = json.loads(db.execute('SELECT payload FROM control').fetchone()[0])
+            self.assertFalse(control.get('start_barrier') or control.get('cleanup_barrier'))
+        service.closing_notes(self.root, self.worker, 'Final MATCH rejected as prior unfit; integration repair remains.',
+                              api=lambda tool, body: dict(checkpoint_id='chk_rejected_notes'))
+        evidence.report(self.root, self.worker, db_path)
+        audited = evidence.audit_worker(self.root, self.task, life.snapshot(self.root, self.worker),
+                                         dict(open_claims=[], recent=[]), db_path)
+        self.assertEqual(audited['evidence_errors'], [])
+        self.assertEqual(audited['source_handoff'], 'retained')
+        self.assertEqual(audited['verification'], 'not_submitted')
+        rejection = self.root/self.worker/'submit-error.json'
+        saved = life.load(rejection)
+        saved['source_sha256'] = '0' * 64
+        life.save(rejection, saved)
+        self.assertEqual(evidence.audit_worker(self.root, self.task, life.snapshot(self.root, self.worker),
+                                               dict(open_claims=[]), db_path)['evidence_integrity'], 'invalid')
+
+    def test_unknown_conflicts_and_service_errors_stay_pending(self):
+        db_path = self.promoted()
+        for error in (self.rejection(response_body=b'not json'), self.rejection(code=503),
+                      self.rejection(code=429), self.rejection(response_body=b'{"error":"conflict"}'),
+                      self.rejection(response_body=self.rejection().response_body.replace(b'0x00123456', b'0x00999999')),
+                      ValueError('timeout; ambiguous')):
+            # A fresh fixture reservation for each independent simulated failure.
+            self.change(state='claimed', closure_operation=None)
+            error_path = self.root/self.worker/'submit-error.json'
+            if error_path.exists():
+                error_path.unlink()
+            calls = []
+            def api(tool, body):
+                calls.append(tool)
+                if tool == 'submit':
+                    raise error
+                return self.api(tool, body)
+            with self.assertRaises(ValueError):
+                service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+            self.assertEqual(calls, ['status', 'submit'])
+            self.assertEqual(life.snapshot(self.root, self.worker)['state'], 'close_pending')
+            with self.assertRaises(ValueError):
+                service.reconcile(self.root, self.worker, api=self.api, db_path=db_path)
+
+    def test_rejection_crash_reconciles_read_only_and_never_replays_submit(self):
+        db_path = self.promoted()
+        calls = []
+        def api(tool, body):
+            calls.append(tool)
+            if tool == 'submit':
+                raise self.rejection()
+            if len(calls) == 3:
+                raise ValueError('crash during ownership refresh')
+            return self.api(tool, body)
+        with self.assertRaisesRegex(ValueError, 'crash'):
+            service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        result = service.reconcile(self.root, self.worker, api=self.api, db_path=db_path)
+        self.assertEqual(result['next_action'], 'giveup')
+        with self.assertRaisesRegex(ValueError, 'giveup only'):
+            service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        with self.assertRaises(ValueError):
+            life.require_experiment(self.root, self.worker)
+        self.assertEqual(calls.count('submit'), 1)
+
+    def test_ambiguous_giveup_after_rejection_is_never_replayed(self):
+        db_path = self.promoted()
+        calls = []
+        def api(tool, body):
+            calls.append(tool)
+            if tool == 'submit':
+                raise self.rejection()
+            if tool == 'giveup':
+                raise ValueError('lost giveup response')
+            return self.api(tool, body)
+        with self.assertRaisesRegex(ValueError, 'lost giveup'):
+            service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        with self.assertRaisesRegex(ValueError, 'different or ambiguous closure'):
+            service.reconcile(self.root, self.worker, api=self.api, db_path=db_path)
+        self.assertEqual(calls.count('giveup'), 1)
+
+    def test_reviewed_recovery_finishes_rejection_after_crash(self):
+        import recovery
+        db_path = self.promoted()
+        calls = []
+        def crashed(tool, body):
+            calls.append(tool)
+            if tool == 'submit':
+                raise self.rejection()
+            if len(calls) == 3:
+                raise ValueError('crash after durable rejection')
+            return self.api(tool, body)
+        with self.assertRaisesRegex(ValueError, 'crash'):
+            service.close(self.root, self.worker, 'submit', db_path=db_path, api=crashed)
+        self.change(session_finished_utc=life.stamp())
+        self.assignment['target'] = dict(address=self.task['address'], review=REVIEW)
+        life.save(self.root/self.worker/'assignment.json', self.assignment)
+        self.task['assignment_sha256'] = m.digest(self.root/self.worker/'assignment.json')
+        life.save(self.root/'batch.json', dict(schema_version=3, batch=self.root.name, tasks=[self.task]))
+        with closing(m.connect(db_path)) as db:
+            check_id = m.attempt(db, 'clm_fixture')['final_check_id']
+        action = dict(worker=self.worker, address=self.task['address'], claim_id='clm_fixture',
+                      session_id='ses_fixture', session_finished=True, operation='giveup', check_id=check_id,
+                      notes=dict(reason='Explicit prior-unfit rejection, no submission occurred.', category='unknown_type',
+                                 tried='Checked final MATCH and received an explicit integration rejection.',
+                                 still_differs='Only project-file integration remains.', suspected_cause='Incompatible stand-in types.'),
+                      closing_note='Exact MATCH was rejected for integration; checked source retained for type repair.')
+        opened = True
+        def recovered(tool, body):
+            nonlocal opened
+            calls.append(tool)
+            if tool == 'giveup':
+                opened = False
+                return self.api(tool, body)
+            if tool == 'checkpoint':
+                return dict(checkpoint_id='chk_recovery_notes')
+            if tool == 'status' and not opened:
+                return dict(open_claims=[])
+            return self.api(tool, body)
+        result = recovery.apply(self.root, dict(batch=self.root.name, workers=[action]), db_path=db_path, api=recovered)
+        self.assertTrue(result['ok'])
+        self.assertEqual(calls.count('submit'), 1)
+        self.assertEqual(calls.count('giveup'), 1)
+
+    def test_rejection_requires_unchanged_source_and_fresh_ownership(self):
+        db_path = self.promoted()
+        def api(tool, body):
+            if tool == 'submit':
+                raise self.rejection()
+            if life.snapshot(self.root, self.worker)['state'] == 'close_pending':
+                return dict(open_claims=[])
+            return self.api(tool, body)
+        with self.assertRaisesRegex(ValueError, 'fresh status'):
+            service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        (self.root/self.worker/'closure-source.cpp').write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'frozen source invalid'):
+            service.reconcile(self.root, self.worker, api=self.api, db_path=db_path)
+
+    def test_stop_during_rejection_still_allows_giveup_without_compilation(self):
+        db_path = self.promoted()
+        def api(tool, body):
+            if tool == 'submit':
+                (self.root/'STOP').touch()
+                raise self.rejection()
+            if tool == 'giveup':
+                return dict(released=True, best_code='best_code kept: fixture')
+            return self.api(tool, body)
+        with patch.object(m.subprocess, 'run', side_effect=AssertionError('no compilation')):
+            result = service.close(self.root, self.worker, 'submit', db_path=db_path, api=api)
+        self.assertTrue(result['assessment']['lease_closed'])
+        self.assertEqual(life.snapshot(self.root, self.worker)['outcome'], 'given_up')
+
     def test_report_effective_review_records_discovered_reclassification(self):
         self.assignment['target'] = dict(
             address=self.task['address'], size=10, lane='research', give_ups=1,

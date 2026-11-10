@@ -11,9 +11,11 @@ USER_AGENT = 'f3-matchflow/3 (OpenCode; local contributor tooling)'
 
 
 class ServiceError(ValueError):
-    def __init__(self, code, retry_after='unspecified', kind=None):
+    def __init__(self, code, retry_after='unspecified', kind=None, response_body=None):
         self.code = code
         self.retry_after = retry_after
+        # Private host evidence only. Never include this in exception text/tool output.
+        self.response_body = response_body
         self.kind = kind or ({401: 'authentication', 403: 'access_denied', 429: 'rate_limit',
                               503: 'capacity'}.get(code, 'http_error'))
         super().__init__('service HTTP %s (%s); Retry-After=%s; no automatic retry' %
@@ -47,12 +49,13 @@ def fetch(url, body=None, limit=64 * 1024 * 1024, opener=None):
     except urllib.error.HTTPError as exc:
         # Inspect only for a classification, never emit bodies (they can contain source).
         try:
-            sample = exc.read(8192).lower()
+            sample = exc.read(8193)
         finally:
             exc.close()
-        edge = exc.code == 403 and (b'cloudflare' in sample or b'error 1010' in sample)
+        edge = exc.code == 403 and (b'cloudflare' in sample.lower() or b'error 1010' in sample.lower())
         raise ServiceError(exc.code, exc.headers.get('Retry-After', 'unspecified'),
-                           'edge_rejection' if edge else None) from None
+                           'edge_rejection' if edge else None,
+                           response_body=sample if len(sample) <= 8192 else None) from None
     except (urllib.error.URLError, TimeoutError):
         raise ValueError('service transport failed; outcome ambiguous, reconcile without retry') from None
 

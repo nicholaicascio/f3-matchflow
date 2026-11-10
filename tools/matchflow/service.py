@@ -4,6 +4,7 @@ from contextlib import closing
 import json
 import hashlib
 import os
+import re
 from pathlib import Path
 from transport import ServiceError, request
 
@@ -68,6 +69,8 @@ def reconcile(folder, worker, claim_id=None, api=request, db_path=ledger.DEFAULT
     if state['state'] == 'close_pending':
         ack_path = folder / worker / 'service-ack.json'
         if not ack_path.exists():
+            if (folder / worker / 'submit-error.json').exists():
+                return resume_rejected_submit(folder, worker, status)
             raise ValueError('no acknowledgement saved; preserve best source and reconcile with operator, no automatic retry')
         ack = life.load(ack_path)
         if ack['claim_id'] != state['claim_id'] or ack['address'] != state['address']:
@@ -305,6 +308,55 @@ def _record_near_miss(folder, worker, cid, record, db_path):
     return life.load(path)
 
 
+def prior_unfit_rejection(error, address):
+    """Recognize only the service's explicit non-mutating, address-bound rejection."""
+    if not isinstance(error, ServiceError) or error.code != 409 or not error.response_body:
+        return False
+    try:
+        value = json.loads(error.response_body)
+    except (ValueError, UnicodeError):
+        return False
+    message = value.get('error') if isinstance(value, dict) else None
+    if isinstance(message, dict):
+        message = message.get('message')
+    if not isinstance(message, str):
+        return False
+    return (message.startswith('function ' + address + ': this exact code was already found unfit ')
+            and 'Nothing was submitted (no strike).' in message
+            and '(it matches the pack but not the project file)' in message
+            and set(re.findall(r'0x[0-9a-fA-F]{8}', message)) == {address})
+
+
+def rejection_record(folder, worker, state):
+    """Read and validate the private rejection without mutating lifecycle state."""
+    folder = Path(folder)
+    path = folder / worker / 'submit-error.json'
+    saved = life.load(path)
+    if saved.get('claim_id') != state['claim_id'] or saved.get('address') != state['address'] or saved.get('session_id') != state['session_id']:
+        raise ValueError('rejection identity differs from assignment')
+    error = ServiceError(saved['http_status'], response_body=saved['response_body'])
+    if (saved.get('operation') != 'submit' or not prior_unfit_rejection(error, state['address']) or
+            ledger.digest(folder / worker / 'closure-source.cpp') != saved['source_sha256']):
+        raise ValueError('rejection evidence or frozen source invalid')
+    return saved
+
+
+def resume_rejected_submit(folder, worker, status):
+    """Resolve a proven rejection, not an ambiguous mutation. Closure only, no retry."""
+    folder = Path(folder)
+    with life.transaction(folder) as db:
+        state = life.read_worker(db, worker)
+        if state['state'] != 'close_pending' or state.get('closure_operation') != 'submit':
+            raise ValueError('rejection cannot resolve a different or ambiguous closure')
+        rejection_record(folder, worker, state)
+        owned(status, state['claim_id'], state['address'])
+        state.update(state='claimed', closure_requested=True,
+                     submission_rejected='prior_unfit', closure_operation=None)
+        life.write_worker(db, worker, state)
+    return dict(state='claimed', submission_rejected='prior_unfit', next_action='giveup',
+                note='Submission definitively rejected; closure only. Preserve checked source; never resubmit it.')
+
+
 def close(folder, worker, operation, source=None, notes=None, no_source_reason=None,
           db_path=ledger.DEFAULT_DB, api=request, origin='operator'):
     # Validate model-controlled shapes before any network or closure reservation.
@@ -317,6 +369,8 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
     folder = Path(folder)
     state = life.snapshot(folder, worker)
     cid = state['claim_id']
+    if state.get('submission_rejected') and operation != 'giveup':
+        raise ValueError('prior-unfit submission rejected; giveup only, never replay submit')
     if origin == 'worker' and life.voluntary_experiment(folder, worker, state) and life.unread_help(folder, worker):
         raise ValueError('unread parent help: read status.help then help_ack before voluntary closure')
     owned(api('status', {}), cid, state['address'])
@@ -369,7 +423,7 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
                 raise ValueError('refusing to overwrite a different frozen closure source')
     # Reject unread answers before creating immutable artifacts. Once reserved,
     # failures leave close_pending for host reconciliation, never new experiments.
-    life.begin_close(folder, worker, require_help_read=origin == 'worker')
+    life.begin_close(folder, worker, require_help_read=origin == 'worker', operation=operation)
     if source:
         if not frozen.exists():
             with frozen.open('xb') as output:
@@ -394,7 +448,31 @@ def close(folder, worker, operation, source=None, notes=None, no_source_reason=N
         response = api('flag', dict(claim_id=cid, scope='function', category='pack_problem', note=notes['note'],
                                    compile_flags=proof_flags, checkpoint_id=checkpoint_id, keep_claim=False))
     else:
-        response = api(operation, body)
+        try:
+            response = api(operation, body)
+        except ServiceError as exc:
+            # Save the actual bounded response privately before classification. Unknown
+            # conflicts and transport failures keep the pending reservation untouched.
+            error_path = folder / worker / (operation + '-error.json')
+            error_record = dict(claim_id=cid, address=state['address'], session_id=state['session_id'],
+                                operation=operation, observed_utc=life.stamp(), http_status=exc.code,
+                                retry_after=exc.retry_after,
+                                response_body=exc.response_body.decode('utf-8', errors='replace') if isinstance(exc.response_body, bytes) else exc.response_body,
+                                source_sha256=ledger.digest(frozen) if source else None)
+            with error_path.open('x', encoding='utf-8') as output:
+                json.dump(error_record, output)
+            if operation != 'submit' or not prior_unfit_rejection(exc, state['address']):
+                raise
+            resume_rejected_submit(folder, worker, api('status', {}))
+            result = close(folder, worker, 'giveup', source=frozen, db_path=db_path, api=api, origin=origin,
+                           notes=dict(reason='Service explicitly rejected identical previously unfit source; nothing submitted.',
+                                      category='unknown_type',
+                                      tried='Final official MATCH was submitted once and definitively rejected as previously unfit for project-file integration.',
+                                      still_differs='No local codegen difference. Project-file integration remains unfit; private submit-error.json retains the service explanation.',
+                                      suspected_cause='Candidate declarations conflict with project-file types. A future reviewed attempt needs an integration repair, not identical resubmission.'))
+            result['assessment'].update(submission_rejected='prior_unfit', operation='giveup',
+                                        next_action='Save closing notes and generate report; source retained, not submitted.')
+            return result
     ack_path = folder / worker / 'service-ack.json'
     envelope = dict(claim_id=cid, address=state['address'], operation=operation,
                     observed_utc=life.stamp(), response=response, assessment=None,

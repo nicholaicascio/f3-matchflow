@@ -350,6 +350,29 @@ or full-unit compatibility.
 
 ## Closure, failure and audit
 
+### Definitive prior-unfit submission rejection
+
+The host recognizes only an address-bound structured HTTP 409 explicitly saying the
+identical source was previously unfit and nothing was submitted (no strike). It writes
+the bounded response to private `submit-error.json` (never ordinary logs), confirms
+fresh ownership, freezes experiments, and gives up once with the exact checked source.
+The give-up has its own `service-ack.json`; the rejected submit is never replayed or
+treated as a submission. The worker receives `submission_rejected=prior_unfit` and
+must save closing notes and generate its report. This handled outcome does not stop
+healthy siblings or streaming discovery.
+
+If interrupted before give-up, `service.py reconcile` validates the rejection and
+frozen-source hash read-only remotely, restoring closure-only eligibility. Use the
+ordinary reviewed `batch.py recover --actions ... --apply` give-up path to finish;
+existing pending give-ups are never replayed. Unknown/malformed conflicts, truncated
+responses, ownership changes, timeouts and 429/503 remain fail-closed. Historical
+pending closures without the new rejection/operation evidence are not auto-repaired.
+
+Discovery receipts also include the actual earlier catalog-status verdicts for the
+target, with their original timestamp. Enqueue merges these with local verdicts and
+requires a concrete integration plan for known unfit history, even if annotations
+claim it is clean. Counts alone are not verdict history.
+
 ### Bounded read-only local inspection
 
 These commands replace ad-hoc SQL and lifecycle dump scripts. They use SQLite `mode=ro`

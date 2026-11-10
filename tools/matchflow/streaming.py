@@ -251,6 +251,11 @@ def discover(session, op, data, api=service.request):
             info = api('function_info', dict(address=address))
             receipt = dict(checked_at=life.stamp(), response=info,
                 local_history=screen.local_history(workspace_root()/'work/matchflow/ledger.sqlite3', address))
+            # Counts are not verdict history. Retain the actual service status evidence
+            # already fetched by catalog, including integration failures absent locally.
+            status_receipt = life.load(folder/'status.json')
+            receipt['service_verdicts'] = dict(checked_at=status_receipt['checked_at'],
+                recent=[r for r in status_receipt['response'].get('recent', []) if r.get('addr') == address])
             with life.transaction(folder) as db:
                 db.execute('INSERT OR REPLACE INTO stream_info VALUES(?,?)', (address, json.dumps(receipt)))
             return receipt
@@ -285,6 +290,7 @@ def enqueue(folder, data, api):
         target = dict(receipt['response'], reason=data.get('reason'), review=data.get('review'))
         # Merge actual known local integration failures, not just the annotation.
         known = [r.get('verdict') for r in receipt['local_history'].get('verdicts', []) if r.get('verdict')]
+        known += [r['verdict'] for r in receipt.get('service_verdicts', {}).get('recent', []) if r.get('verdict')]
         if any(r.get('state') == 'unfit' for r in receipt['local_history'].get('attempts', [])):
             known.append('unfit')
         if isinstance(target['review'], dict):

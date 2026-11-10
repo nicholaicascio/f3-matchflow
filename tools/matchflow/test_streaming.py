@@ -112,6 +112,22 @@ class StreamingTests(unittest.TestCase):
             value.update(updates)
             streaming.put_control(db, value)
 
+    def test_service_prior_unfit_cannot_be_hidden_by_clean_annotations(self):
+        self.open()
+        self.discover('catalog')
+        saved = life.load(self.folder/'status.json')
+        saved['response']['recent'] = [dict(id='sub_fixture', addr='0x00123456', verdict='unfit', detail='type conflict')]
+        life.save(self.folder/'status.json', saved)
+        receipt = self.discover('inspect', dict(address='0x00123456'))
+        self.assertEqual(receipt['service_verdicts']['checked_at'], saved['checked_at'])
+        with self.assertRaisesRegex(ValueError, 'integration plan'):
+            self.discover('enqueue', self.review())
+        self.assertEqual(self.api.count('claim'), 0)
+        reviewed = self.review()
+        reviewed['review']['integration_plan'] = 'Replace the conflicting stand-in with the real named type before checking'
+        result = self.discover('enqueue', reviewed)
+        self.assertIn('claim_id', result)
+
     def test_open_initializes_empty_supervised_run_and_freezes_model(self):
         result = self.open()
         self.require.assert_called_once_with()

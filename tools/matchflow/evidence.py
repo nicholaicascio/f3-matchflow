@@ -211,6 +211,9 @@ def report(folder, worker, db_path=ledger.DEFAULT_DB):
             result['permute_runs'] = [{k: v for k, v in item.items() if k != 'record'}
                                       for item in ledger.permute_runs(db, state['claim_id'])]
         result.update(closing_notes=notes, setup_failure=None)
+        if state.get('submission_rejected') == 'prior_unfit':
+            result['remaining'].append('Exact source rejected as previously unfit for project-file integration; '
+                                       'source retained, not submitted. Private service explanation: submit-error.json.')
         life.save(folder / worker / 'report.json', result)
     return result
 
@@ -448,6 +451,12 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
         return dict(lease_closure='not_claimed', evidence_integrity='invalid' if errors else 'valid',
                     source_handoff='not_applicable', verification='not_submitted', evidence_errors=errors)
     opened = {c['claim_id'] for c in status['open_claims']}
+    if state.get('submission_rejected'):
+        try:
+            from service import rejection_record
+            rejection_record(folder, task['id'], state)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            errors.append('submission rejection evidence: ' + str(exc))
     lease = 'open' if claim in opened else 'absent' if claim else 'unknown'
     handoff, verification = 'unknown', 'unknown'
     if state.get('address') != task['address']:

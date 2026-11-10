@@ -128,6 +128,14 @@ The external workspace stores official dependencies and private runtime artifact
   required and are never blocked by missing model prose.
 - Do not retry ambiguous mutations. Save durable responses, reconcile read-only, and
   escalate cleanup_required. HTTP 429/503 stops new starts, preserves Retry-After, no loops.
+- A submit HTTP 409 is recoverable only when the bounded structured service response
+  explicitly identifies this address, identical prior-unfit source and "Nothing was
+  submitted (no strike)." The host saves private rejection evidence separately from
+  closure receipts, confirms fresh exact ownership and permits closure only. It never
+  retries submit: it gives up once with the frozen checked source retained. Workers
+  then save closing notes and reports normally; healthy siblings/discovery continue.
+  A crash before give-up can be reconciled read-only and closed through reviewed
+  recovery. An unknown conflict or lost give-up response remains ambiguous and blocked.
 - After closure save required closing notes and generate the canonical report. Parent
   checks the acknowledged closing-notes receipt independently of give-up/submit prose and
   reconciles fresh official status and actual receipts, including after crashes/quota

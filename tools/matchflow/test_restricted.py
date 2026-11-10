@@ -756,6 +756,21 @@ class BrokerTests(unittest.TestCase):
 
 
 class TransportTests(unittest.TestCase):
+    def test_conflict_body_is_private_and_bounded(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = Path(folder)/'private'; key.write_text('fake-test-key')
+            for body in (b'{"error":"PRIVATE_SOURCE_DETAIL"}', b'x' * 8193):
+                error = urllib.error.HTTPError('https://f3decomp.com', 409, 'error', {}, io.BytesIO(body))
+                class Opener:
+                    def open(self, req, timeout):
+                        raise error
+                with patch.object(transport, 'key_file', return_value=key):
+                    with self.assertRaises(transport.ServiceError) as raised:
+                        transport.fetch('https://f3decomp.com/api/v1/submit', {}, opener=Opener())
+                self.assertEqual(raised.exception.response_body, body if len(body) <= 8192 else None)
+                self.assertNotIn('PRIVATE_SOURCE_DETAIL', str(raised.exception))
+                self.assertNotIn('fake-test-key', str(raised.exception))
+
     def test_errors_are_classified_without_source_or_key_in_message(self):
         with tempfile.TemporaryDirectory() as folder:
             key = Path(folder)/'private'; key.write_text('fake-test-key')
