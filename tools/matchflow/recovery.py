@@ -19,7 +19,7 @@ from snapshots import checked_source, available
 
 def inventory(folder, status, db_path=ledger.DEFAULT_DB):
     folder = Path(folder)
-    tasks = life.load(folder/'batch.json')['tasks']
+    tasks = life.manifest(folder)['tasks']
     opened = {c['claim_id']: c for c in status['open_claims']}
     workers = []
     for task in tasks:
@@ -40,7 +40,10 @@ def inventory(folder, status, db_path=ledger.DEFAULT_DB):
             notes = dict(status='missing_or_unresolved')
         ack = folder/worker/'service-ack.json'
         near = folder/worker/'near-miss-review.json'
+        from broker import saved_binding
+        bound = saved_binding(folder,worker)
         workers.append(dict(worker=worker, address=state['address'], session_id=state['session_id'], claim_id=cid,
+                             partial_binding_session_id=(bound['session'] if bound and state.get('session_id') is None else None),
                             state=state['state'], outcome=state.get('outcome'),
                             session_finished=bool(state.get('session_finished_utc') or (folder/worker/'usage-raw.json').exists()),
                             lease=opened.get(cid), acknowledgement_present=ack.is_file(), closing_notes=notes,
@@ -53,7 +56,7 @@ def inventory(folder, status, db_path=ledger.DEFAULT_DB):
 
 def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
     folder = Path(folder)
-    manifest = life.load(folder/'batch.json')
+    manifest = life.manifest(folder)
     if manifest.get('schema_version') != 3:
         raise ValueError('only reviewed v3 assignments support applied recovery')
     if not isinstance(actions, dict) or actions.get('batch') != manifest['batch'] or not isinstance(actions.get('workers'), list):
@@ -73,19 +76,32 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
         if (ledger.digest(assignment_path) != tasks[worker].get('assignment_sha256') or
                 assignment['target']['address'] != state.get('address') or tasks[worker]['address'] != state.get('address')):
             raise ValueError('immutable recovery assignment differs from task or lifecycle')
+        if action.get('binding_session_id') and state.get('session_id') is None:
+            if action.get('session_id') != action['binding_session_id']:
+                raise ValueError('reviewed session must match explicit partial binding session')
+            from broker import reconcile_unprompted_binding
+            reconcile_unprompted_binding(folder,worker,action['binding_session_id'])
+            state = life.snapshot(folder,worker)
         if any(action.get(k) != state.get(k) for k in ('address', 'claim_id', 'session_id')):
             raise ValueError('reviewed recovery identity differs from bound assignment')
-        if not isinstance(state.get('session_id'), str) or not re.fullmatch(r'ses_[A-Za-z0-9]+', state['session_id']):
+        from streaming import unassigned_recovery
+        unassigned = action.get('unassigned') is True and unassigned_recovery(folder, worker, state)
+        if not unassigned and (not isinstance(state.get('session_id'), str) or not re.fullmatch(r'ses_[A-Za-z0-9]+', state['session_id'])):
             raise ValueError('real bound session required for applied recovery')
-        if action.get('session_finished') is not True:
+        unprompted = (action.get('unprompted_binding') is True and
+                      state.get('unprompted_binding', {}).get('session_id') == state.get('session_id') and
+                      not state.get('setup_started'))
+        if not unassigned and not unprompted and action.get('session_finished') is not True:
             raise ValueError('review must confirm this exact session has finished')
-        if not state.get('session_finished_utc'):
+        if not unassigned and not unprompted and not state.get('session_finished_utc'):
             usage_path = folder/worker/'usage-raw.json'
             usage = life.load(usage_path) if usage_path.is_file() else {}
             if usage.get('session_id') != state['session_id'] or not usage.get('captured_utc'):
                 raise ValueError('host completion evidence required; never race a running worker')
         if action.get('operation') not in ('giveup', 'finish'):
             raise ValueError('recovery only gives up an explicitly reviewed claim or finishes acknowledged closure')
+        if (unassigned or unprompted) and (action.get('source') or 'check_id' in action or not action.get('no_source_reason')):
+            raise ValueError('unassigned recovery requires explicit no-source reason; no candidate exists')
         if action.get('source') and 'check_id' in action:
             raise ValueError('choose source OR check_id, not both')
         if state['state'] == 'close_pending' and not (folder/worker/'service-ack.json').exists():
@@ -121,6 +137,13 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
     results = []
     for action in actions['workers']:
         worker = action['worker']
+        state = life.snapshot(folder, worker)
+        if (action.get('unassigned') or action.get('unprompted_binding')) and state['state'] != 'closed':
+            from streaming import unassigned_recovery
+            if not (state.get('unprompted_binding') and not state.get('setup_started')) and not unassigned_recovery(folder,worker,state):
+                raise ValueError('unassigned claim no longer safe for recovery')
+            life.setup_step(folder,worker,'claim')
+            life.request_cleanup(folder,worker,'unassigned_stream_recovery')
         # Read-only reconciliation first; close_pending is never replayed.
         service.reconcile(folder, worker, api=api, db_path=db_path)
         state = life.snapshot(folder, worker)
@@ -152,4 +175,7 @@ def apply(folder, actions, db_path=ledger.DEFAULT_DB, api=service.request):
         results.append(dict(worker=worker, **audited))
         if audited['evidence_integrity'] != 'valid' or audited['lease_closure'] not in ('closed_acknowledged', 'not_claimed'):
             raise ValueError('recovery audit requires review; no further actions applied')
+        if manifest.get('streaming'):
+            with life.transaction(folder) as db:
+                db.execute("UPDATE stream_tasks SET state='closed' WHERE worker=?", (worker,))
     return dict(workers=results, ok=True, note='Only reviewed workers touched; no claims, replacements or mutation retries.')

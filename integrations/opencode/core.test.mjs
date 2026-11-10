@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelRef, launch, workerPermissions, invoke, requireWorkerModel } from './core.mjs';
+import { modelRef, launch, stream, workerPermissions, discoveryPermissions, invoke, requireWorkerModel } from './core.mjs';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -164,4 +164,64 @@ test('model check allows exact variants and models without a variant; never chan
     assert.throws(()=>modelRef(value),/Explicit provider\/model/);
   }
   assert.deepEqual(modelRef('router/vendor/model'),{providerID:'router',id:'vendor/model'});
+});
+
+test('stream open binds restricted producer before first prompt without claiming',async()=>{
+  const calls=[];
+  const ctx=availableContext({session:{get:async()=>({id:'ses_parent',agent:'build'}),
+    create:async input=>{calls.push(['create',input]);return {id:'ses_producer'};},
+    prompt:async input=>{calls.push(['prompt',input]);},wait:()=>new Promise(()=>{})}});
+  const host=async(command,value)=>{calls.push([command,value]);return {model:'p/m',requested:20};};
+  const result=await stream(ctx,host,{op:'open',batch:'stream',requested:20},{sessionID:'ses_parent'});
+  assert.equal(result.discoverySessionID,'ses_producer');
+  assert.deepEqual(calls.map(c=>c[0]),['stream','create','stream','prompt']);
+  assert.equal(calls[1][1].agent,'match-discovery');
+  assert.deepEqual(calls[1][1].permissions,discoveryPermissions);
+  assert.equal(calls[2][1].op,'bind');
+});
+
+test('stream next hands off preclaimed task and suppresses routine child completion prompts',async()=>{
+  const calls=[];
+  const ctx=availableContext({session:{get:async input=>({id:input.sessionID,agent:'build'}),
+    create:async()=>({id:'ses_child'}),prompt:async input=>calls.push(['prompt',input]),wait:async()=>{}}});
+  const host=async(command,value)=>{
+    calls.push([command,value]);
+    if(command==='stream'&&value.op==='next') return {model:'p/m',worker:'worker01',address:'0x00123456',prompt:'work'};
+    if(command==='start')return {ready:true,claim_id:'clm_existing'};
+    return {cleanup_required:false};
+  };
+  await stream(ctx,host,{op:'next',batch:'stream'},{sessionID:'ses_parent'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(calls.filter(c=>c[0]==='task').length,0);
+  assert.equal(calls.filter(c=>c[0]==='prompt').length,1);
+  assert.equal(calls.filter(c=>c[0]==='stream'&&c[1].op==='assigned').length,1);
+});
+
+test('stream startup failure latches stop and never consumes another claim',async()=>{
+  const calls=[];
+  const ctx=availableContext({session:{get:async()=>({id:'ses_parent'}),create:async()=>{throw new Error('offline');}}});
+  const host=async(command,value)=>{
+    calls.push(value.op);
+    return {model:'p/m',worker:'worker01',address:'0x00123456'};
+  };
+  await assert.rejects(stream(ctx,host,{op:'next',batch:'stream'},{sessionID:'ses_parent'}),/offline/);
+  assert.deepEqual(calls,['next','fail']);
+});
+
+test('restricted producer cannot orchestrate or launch matching children',async()=>{
+  const ctx={session:{get:async()=>({id:'ses_producer',agent:'match-discovery'})}};
+  await assert.rejects(stream(ctx,()=>assert.fail(),{op:'next'},{sessionID:'ses_producer'}),/cannot orchestrate/);
+  await assert.rejects(launch(ctx,()=>assert.fail(),{},{sessionID:'ses_producer'}),/cannot launch/);
+});
+
+test('lost next response requests a durable stop without consuming another task',async()=>{
+  const calls=[];
+  const ctx={session:{get:async()=>({id:'ses_parent'})}};
+  const host=async(command,value)=>{
+    calls.push(value.op);
+    if(value.op==='next')throw new Error('response lost after reservation');
+    return {};
+  };
+  await assert.rejects(stream(ctx,host,{op:'next',batch:'stream'},{sessionID:'ses_parent'}),/response lost/);
+  assert.deepEqual(calls,['next','fail']);
 });

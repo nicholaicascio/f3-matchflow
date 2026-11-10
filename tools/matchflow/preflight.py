@@ -20,7 +20,8 @@ def fingerprint():
                    worker_schema=digest(REPOSITORY/'integrations/opencode/worker-schema.json'),
                   policy=digest(REPOSITORY/'docs/matching-policy.md'),
                   prompt=digest(REPOSITORY/'tools/matchflow/prompts/worker.txt'),
-                  agent=digest(REPOSITORY/'.opencode/agents/match-worker.md'))
+                   agent=digest(REPOSITORY/'.opencode/agents/match-worker.md'),
+                   discovery_agent=digest(REPOSITORY/'.opencode/agents/match-discovery.md'))
     return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 

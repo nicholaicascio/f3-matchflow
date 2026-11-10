@@ -262,7 +262,7 @@ class BrokerTests(unittest.TestCase):
                     else [dict(claim_id='clm_fixture', address='0x00123456', this_key=True,
                                expires=life.stamp(life.utc()+life.timedelta(hours=1)))])
             if tool == 'function_info':
-                return dict(state='open', regions=dict(co_workers=0))
+                return dict(state='open', address=body['address'], regions=dict(co_workers=0))
             if tool == 'claim':
                 self.assertEqual(body['address'], '0x00123456')
                 self.assertNotIn('band', body)

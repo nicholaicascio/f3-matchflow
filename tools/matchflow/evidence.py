@@ -454,7 +454,9 @@ def audit_worker(folder, task, state, status, db_path=ledger.DEFAULT_DB):
         errors.append('ownership address differs from assignment')
     session = state.get('session_id')
     if not isinstance(session, str) or not re.fullmatch(r'ses_[A-Za-z0-9]+', session):
-        errors.append('missing or placeholder session ID')
+        from streaming import unassigned_recovery
+        if not unassigned_recovery(folder, task['id'], state):
+            errors.append('missing or placeholder session ID')
     for key in ('worker_start_utc', 'deadline_utc', 'closed_utc'):
         if key not in state:
             errors.append('missing timestamp: ' + key)

@@ -19,13 +19,13 @@ The external workspace stores official dependencies and private runtime artifact
 - A saved draft is never a selection preference by itself. It is starting material after
   the function is chosen on reviewed history, report scope and a concrete lead. The same
   applies to a near-miss count: it is not a readiness score.
-- Resolve worker model at preparation: explicit `--model`, then local `worker_model`,
+- Resolve worker model at stream open or preparation: explicit `model` or `--model`, then local `worker_model`,
   then built-in opencode-go/deepseek-v4.1-flash#max. Honor explicit human overrides.
   Before child creation/claim, require that exact enabled tool-capable chat model and
   optional variant in OpenCode's active catalog. Missing/catalog failure is a setup
   error, never permission to fall back. Record actual model, variant, harness and usage,
   never guessed billing. Local setting changes never change prepared assignments.
-- Prepare fresh v3 assignments with review facts and fresh successful online preflight. Dispatch subagents,
+- For the prepared path, prepare fresh v3 assignments with review facts and fresh successful online preflight. Dispatch subagents,
   then use matchflow_launch for each exact prepared worker. Its trusted host claims just
   before work, validates ownership, obtains the exact pack and registers evidence.
 - Only dedicated match-worker sessions with deny-by-default scoped tools may match.
@@ -33,6 +33,35 @@ The external workspace stores official dependencies and private runtime artifact
 - Keep orchestration bounded: use the read-only screen CLI, inspect only the final
   shortlist, then review actual histories/reports. No game/disassembly scans or
   speculative source hypotheses by default. Selection leads are tentative, not facts.
+
+### Authorized streaming runs
+
+- `matchflow_stream` open accepts `batch`, `requested` 1..50, `backlog` 1..4 (default 2)
+  and optional `model`. Require fresh successful online preflight before opening. Open
+  creates the immutable header, freezes the config fingerprint, validates the resolved
+  model, starts the watchdog and starts a bound restricted `match-discovery` producer.
+  The parent immediately starts `python tools/matchflow/batch.py monitor BATCH` in the
+  background. Neither setup nor documentation/offline tests authorize opening a run.
+- Only that producer uses `matchflow_discovery`: catalog starts with start_here, status
+  and list_bands, then at most four catalog pages; inspect reviews a shortlist bounded
+  by 4*N for requested N, retaining service receipts and local history. The same review,
+  report-scope, prior-unfit and concrete-experiment requirements apply as above.
+- Enqueue supplies address, reason and review. The trusted host validates review facts
+  and fresh metadata, reserves the task, claims the exact address and saves its
+  acknowledgement before queuing it. Unavailability before a claim may be skipped and
+  does not count toward N. Never retry an ambiguous mutation or replace a claimed task.
+- Discovery wait is a bounded local backlog wait, not service polling or extra screening.
+  Finish records explicit exhaustion. Status is read-only. `producer_done` at quota
+  means N acknowledged claims, not N consumer assignments; exhaustion can end short.
+- `matchflow_stream` next consumes one FIFO acknowledged claim and launches its bound
+  `match-worker` without an extra claim. Status is read-only. Consumer assigned N and
+  worker closure are separate milestones. Startup failures latch STOP and require
+  explicit reconciliation; there are no replacement/refill or automatic resume paths.
+- Keep `batch.json` immutable and tasks append-only in `stream_tasks`. Use
+  `lifecycle.manifest` for the combined header/task view. Check the frozen configuration
+  fingerprint during the run; never rerun preflight against active workers or alter
+  shared tooling/configuration/inputs. Isolated new assignment and receipt writes are
+  permitted while workers work. The reviewed prepared-batch path remains supported.
 
 ## Worker method
 
@@ -71,7 +100,10 @@ The external workspace stores official dependencies and private runtime artifact
   blocks new launches, not healthy siblings' experiments. Setup/prompt-admission failures,
   service cooldowns and an explicit batch STOP remain batch-wide. Barriers are durable;
   removing markers does not reopen experiments. Re-arm the monitor after a notification
-  while other workers remain; repeated requests are deduplicated until escalation.
+  while workers or streaming discovery/queued work remain; repeated requests are
+  deduplicated until escalation. Streaming monitoring supervises the dynamic queue and
+  workers, coalesces routine completions and prioritizes STOP, cleanup, heartbeat loss
+  and other urgent events over routine completion summaries.
 - Final official MATCH plus unchanged source/pack/flags permits promotion and submission.
   Alternate-flags proof uses source-bearing checkpoint plus flag-proof. Otherwise give
   up with exact best C++ and category/tried/still_differs/suspected_cause/reason.
@@ -102,5 +134,6 @@ All reusable prompts, wrappers and utilities are versioned here. Generated promp
 snapshots, candidates, packs, checker output, databases, private twin caches and logs
 stay outside Git. Keys stay in private external files, never prompts/argv/logs. The
 official checker/compiler are installed dependencies, not vendored or modified here.
-Never upload game files, machine code or disassembly. Do not modify a workspace used
-by running workers. Scoped tools are a capability boundary, not an OS sandbox.
+Never upload game files, machine code or disassembly. During active work permit isolated
+new assignments/receipts and scoped worker writes only, not changes to shared tooling,
+configuration or inputs. Scoped tools are a capability boundary, not an OS sandbox.

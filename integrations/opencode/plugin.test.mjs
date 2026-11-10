@@ -13,7 +13,7 @@ test('installed SDK registers scoped-only tools and strips broad tools from work
     session:{hook:async(name,handler)=>hooks.set(name,handler)},
     tool:{transform:async callback=>callback({add:tool=>tools.set(tool.name,tool)})},
   });
-  assert.deepEqual([...tools.keys()],['matchflow_launch','matchflow_worker']);
+  assert.deepEqual([...tools.keys()],['matchflow_stream','matchflow_discovery','matchflow_launch','matchflow_worker']);
   const schema=tools.get('matchflow_worker').input;
   assert.equal(schema.additionalProperties,false);
   assert.deepEqual(Object.keys(schema.properties),['op','data']);
@@ -37,4 +37,12 @@ test('worker request rejects unbound identity and silent model failover before g
   const event={sessionID:'ses_real',agent:'match-worker',model:{providerID:'other',id:'model'},tools:{}};
   await assert.rejects(workerContext(event,async()=>({ownership:{model:'p/m'}})),/model changed/);
   await assert.rejects(workerContext(event,async()=>{throw new Error('unbound');}),/unbound/);
+});
+
+test('discovery hook strips every broad tool and rejects model failover',async()=>{
+  const event={sessionID:'ses_discovery',agent:'match-discovery',model:{providerID:'p',id:'m'},
+    tools:{shell:{},execute:{},subagent:{},matchflow_stream:{},matchflow_worker:{},matchflow_discovery:{}}};
+  await workerContext(event,async()=>({model:'p/m'}));
+  assert.deepEqual(Object.keys(event.tools),['matchflow_discovery']);
+  await assert.rejects(workerContext(event,async()=>({model:'other/m'})),/model changed/);
 });

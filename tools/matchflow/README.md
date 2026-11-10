@@ -52,7 +52,10 @@ without changing official tooling. `--download-url OFFICIAL_PACK_URL` optionally
 an existing exact-claim pack URL; otherwise download readiness is explicitly unprobed.
 No fake claim is taken for a probe and no work note is uploaded. Readiness is fingerprinted
 against configuration/tool sources and expires after 15 minutes. Changes require rerunning.
-Do not run preflight or change workspace artifacts while matching workers are running.
+Do not rerun preflight while matching workers are running. During a stream the frozen
+configuration fingerprint is checked without active preflight. Isolated new assignments,
+receipts and scoped worker evidence writes are permitted; shared tooling/config/inputs
+must not change.
 
 Our `check.sh`, `check_runner.py` and `checker.py` stay here. They invoke the external
 official checker through configured WSL/Wine without sourcing workspace shell scripts.
@@ -62,7 +65,77 @@ Notes are forwarded as literal `--name=value` data, never runner configuration.
 WSL is started with `--exec`, bypassing its implicit shell so backticks/`$()` in
 notes are not evaluated before reaching the runner.
 
-## Screen and prepare (orchestrator only)
+## Authorized streaming tools (orchestrator and bound producer)
+
+Streaming is an alternative to the reviewed prepare/dispatch path below, not authorization
+to claim or spend. Obtain the human's matching request and fresh successful online
+preflight before opening. No live tests, claims or paid launches are authorized by this
+reference or by offline testing.
+
+### `matchflow_stream` (orchestrator only)
+
+- `open`: `batch` (fresh name), `requested` 1..50, `backlog` 1..4 (default 2), optional
+  `model` (`provider/model#variant`). Resolve explicit model, then local `worker_model`,
+  then built-in default only if absent. Validate the exact enabled tool-capable chat
+  model and optional variant, with no fallback. Create the frozen header, freeze the
+  configuration fingerprint, start the watchdog and start a host-bound restricted
+  `match-discovery` producer. This is a real authorized run, not a read-only probe.
+- `next`: `batch`. Consume one FIFO acknowledged queued claim and launch its bound
+  `match-worker`, without an additional claim. Do not call prepared `matchflow_launch`
+  for these tasks. No replacement, automatic refill or mutation retry.
+- `status`: `batch`. Read-only run state, not a resume or launch operation.
+
+Example tool inputs, not shell commands:
+
+```json
+{"op":"open","batch":"YOUR_FRESH_BATCH_NAME","requested":20,"backlog":2}
+{"op":"next","batch":"YOUR_FRESH_BATCH_NAME"}
+{"op":"status","batch":"YOUR_FRESH_BATCH_NAME"}
+```
+
+Immediately after open the parent starts this command **in the background** with
+completion notification; do not synchronously wait for it before consuming tasks:
+
+```text
+python tools/matchflow/batch.py monitor BATCH
+```
+
+### `matchflow_discovery` (bound producer only)
+
+Only the host-bound `match-discovery` session uses `{op,data}`. It has no shell, raw
+service access, credentials, source inspection, child sessions or alternate run paths.
+
+- `catalog`: initial start_here/status/list_bands, then at most four catalog pages.
+- `inspect`: exact `address` on a shortlist bounded by 4*N for requested N. Preserve
+  actual service receipts and relevant local history; review substantive attempts,
+  ownership, availability, verdicts and report scope under canonical policy.
+- `enqueue`: `address`, `reason`, `review`. The host validates review facts and fresh
+  metadata, reserves the task, claims the exact address, saves its acknowledgement and
+  then queues it. Concrete next experiments and prior-unfit integration plans remain
+  required under the same review contract as prepared selections.
+- `wait`: bounded local backlog wait, not remote polling or an expanded search budget.
+- `finish`: explicit exhaustion with `reason`; a bounded search may finish short.
+- `status`: read-only producer/run state.
+
+Unavailability discovered before claiming can be skipped and does not count toward the
+requested total. An ambiguous claim or other mutation is never retried. Startup failure
+requires STOP and explicit reconciliation, never a replacement target or automatic resume.
+Retain reservations and receipts for reviewed recovery, including acknowledged queued
+claims that never reached a worker. Do not infer closure from an empty local queue.
+
+At quota `producer_done` means N acknowledged claims, separate from consumer assigned N,
+claim closure, acknowledged closing notes and canonical reports. Explicit exhaustion may
+leave fewer than N. The monitor follows the dynamic queue and worker set, coalesces routine
+completions, and prioritizes STOP, cleanup, heartbeat loss and other urgent events. Re-arm
+after notifications while discovery, queued claims or workers remain.
+
+`batch.json` is an immutable streaming header; task records are append-only in
+`stream_tasks`. Use `lifecycle.manifest` to obtain the combined header/task view rather
+than treating the header as a complete worker list. Isolated assignment/receipt writes
+may continue while workers work. Never change shared tooling, configuration or inputs;
+the run checks its frozen config fingerprint without rerunning preflight while active.
+
+## Screen and prepare (orchestrator only, retained prepared-batch path)
 
 Use the official service tools: start_here, status, list_bands, list_functions and
 function_info. Review history/reports without claiming. Save fresh actual metadata:
@@ -153,7 +226,9 @@ notification, then calls `matchflow_launch({batch:"BATCH",worker:"worker01"})` p
 This tool makes a real fixed-address claim and starts a linked child session, so use it
 only for requested matching work, never code tests. It binds identity before the prompt,
 rechecks service capacity/availability, downloads the exact pack safely and registers it.
-No replacement/refill, auto-resume or mutation retries. Legacy batches cannot launch.
+No replacement/refill, auto-resume or mutation retries. Historical unsupported manifest
+versions cannot launch; the reviewed v3 prepared-batch path remains available alongside
+streaming.
 
 Before child creation/binding or claiming, the plugin verifies the exact prepared
 provider/model is enabled, chat/tool-capable and offers the optional variant in OpenCode's
@@ -164,6 +239,29 @@ guarantee provider credit/network/credentials; later failures follow normal clea
 Changing the local setting affects new batches only, never immutable prepared assignments.
 
 ## Restricted worker contract
+
+### Streaming crash supervision and pre-handoff recovery
+
+The plugin renews a durable producer-controller heartbeat every ten seconds. The
+independent watchdog stops the run after thirty seconds without renewal, even if
+no matching workers exist; discovery also has a forty-minute total bound. A FIFO
+launch reservation abandoned for two minutes latches STOP. A lost `next` response
+requests STOP immediately, never another dequeue. These deadlines do not renew
+claim leases or worker experiment budgets.
+
+Recovery inventory includes `partial_binding_session_id` when the capability
+registry was committed but the lifecycle session write was interrupted. Explicit
+reviewed recovery may use `binding_session_id` and `session_id` set to that exact
+saved identity, plus `unprompted_binding: true`. The host requires STOP, unchanged
+assignment/header hashes, the exact parent, and evidence that setup never began.
+It repairs the local identity only, then uses the ordinary acknowledged no-source
+give-up, notes, report and audit path. No child is run or fake completion invented.
+
+For a stopped claim that never acquired a capability binding, use `session_id: null`
+and `unassigned: true`. Both cases require an explicit `no_source_reason`, structured
+give-up notes and substantive `closing_note`. Neither can carry source/check IDs.
+Ordinary bound workers still require real host completion evidence. Pending claim
+or closure responses remain reconciliation cases, never automatically replayed.
 
 The only available worker tool is `matchflow_worker({op, data})`. Its real session identity
 comes from OpenCode, not the model. Workers cannot select addresses/claims, databases,
@@ -274,9 +372,11 @@ Parent answers are attached to every successful worker tool response as
 Voluntary closure is blocked while an answer is unread, including an atomic recheck at
 closure reservation. STOP/deadline/supervisor loss closure never waits for acknowledgement.
 
-The monitor separately emits durable, deduplicated `claim_closed`, `notes_complete` and
+The monitor records durable, deduplicated `claim_closed`, `notes_complete` and
 `report_complete` milestones. Only `all_complete` means every report and acknowledged
-closing note exists. Re-arm after intermediate events. It automatically saves a compact
+closing note exists. Streaming coalesces routine completion notifications and prioritizes
+urgent STOP/cleanup/heartbeat events while supervising dynamic tasks. Re-arm after
+intermediate events while discovery, queued work or workers remain. It automatically saves a compact
 private `debrief.json`; its verification is unknown until supplied fresh official status.
 
 Use the identity-asserting audit helper for a finished-worker notification:

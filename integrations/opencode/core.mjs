@@ -4,6 +4,10 @@ export const workerPermissions = [
   { action: '*', resource: '*', effect: 'deny' },
   { action: 'matchflow_worker', resource: '*', effect: 'allow' },
 ];
+export const discoveryPermissions = [
+  { action: '*', resource: '*', effect: 'deny' },
+  { action: 'matchflow_discovery', resource: '*', effect: 'allow' },
+];
 
 export function modelRef(model) {
   if (typeof model !== 'string' || !/^[^/\s#]+\/[^\s#]+(?:#[^/\s#]+)?$/.test(model)) throw new Error('Explicit provider/model[#variant] required');
@@ -36,6 +40,16 @@ export async function requireWorkerModel(ctx, selection) {
 }
 
 export async function workerContext(event, host) {
+  if (event.agent === 'match-discovery') {
+    for (const name of Object.keys(event.tools)) {
+      if (name !== 'matchflow_discovery') delete event.tools[name];
+    }
+    const state = await host('discovery', {session:event.sessionID, op:'status', data:{}});
+    const expected = modelRef(state.model);
+    if (event.model?.providerID !== expected.providerID || event.model?.id !== expected.id ||
+        event.model?.variant !== expected.variant) throw new Error('Assigned discovery model changed');
+    return;
+  }
   if (event.agent !== 'match-worker') return;
   for (const name of Object.keys(event.tools)) {
     if (name !== 'matchflow_worker') delete event.tools[name];
@@ -83,17 +97,23 @@ export function invoke(python, script, command, value, signal) {
   });
 }
 
-export async function launch(ctx, host, input, context) {
+export async function launch(ctx, host, input, context, queuedTask = null) {
   const parent = await ctx.session.get({ sessionID: context.sessionID });
-  if (parent.agent === 'match-worker') throw new Error('Matching workers cannot launch sessions');
-  const task = await host('task', { ...input, parent: parent.id }, context.signal);
+  if (['match-worker','match-discovery'].includes(parent.agent)) throw new Error('Restricted workers cannot launch sessions');
+  const task = queuedTask || await host('task', { ...input, parent: parent.id }, context.signal);
   // Read the active catalog in this checkout, not a static provider definition.
   // No child, binding or real claim exists if this local availability check fails.
-  const model = await requireWorkerModel(ctx, task.model);
-  const child = await ctx.session.create({
+  let model, child;
+  try {
+    model = await requireWorkerModel(ctx, task.model);
+    child = await ctx.session.create({
     parentID: parent.id, title: `Matchflow ${input.batch}/${input.worker} ${task.address}`,
     agent: 'match-worker', model, permissions: workerPermissions,
-  });
+    });
+  } catch (error) {
+    if (queuedTask) await host('stream', {op:'fail',batch:input.batch,parent:parent.id});
+    throw error;
+  }
   // Bind before any model sees a prompt or can execute a tool. Never let a prompt
   // choose its own session ID, claim, directory or model. No auto-resume/replay.
   let ready;
@@ -113,6 +133,7 @@ export async function launch(ctx, host, input, context) {
   if (!ready.ready) return { sessionID: child.id, ...ready };
   try {
     await ctx.session.prompt({ sessionID: child.id, text: task.prompt });
+    if (queuedTask) await host('stream', {op:'assigned',...input,parent:parent.id}, context.signal);
   } catch {
     let barrierPersisted = false;
     try {
@@ -128,12 +149,76 @@ export async function launch(ctx, host, input, context) {
     const metadata = await ctx.session.get({ sessionID: child.id });
     const result = await host('completion', { session: child.id,
       metadata: { id: metadata.id, tokens: metadata.tokens, model: metadata.model, outcome: metadata.outcome } });
-    await ctx.session.prompt({ sessionID: parent.id, delivery: 'queue',
-      text: `Matchflow subagent finished: ${JSON.stringify(result)}. Audit/reconcile this exact assignment; do not refill.` });
+    // Streaming routine completions are coalesced by the durable monitor. Urgent
+    // cleanup still wakes the parent immediately, even while discovery is active.
+    if (!queuedTask || result.cleanup_required) {
+      await ctx.session.prompt({ sessionID: parent.id, delivery: 'queue',
+        text: `Matchflow subagent finished: ${JSON.stringify(result)}. Audit/reconcile this exact assignment; do not refill.` });
+    }
   }).catch(async () => {
     try { await host('completion', { session: child.id }); } catch { /* durable lifecycle still requires reconciliation */ }
     await ctx.session.prompt({ sessionID: parent.id, delivery: 'queue',
       text: `Matchflow ${input.batch}/${input.worker} session ${child.id} completion failed. cleanup_required; reconcile, never replay.` });
   });
   return { sessionID: child.id, ...ready, method: 'restricted-subagent' };
+}
+
+export async function stream(ctx, host, input, context) {
+  const parent = await ctx.session.get({sessionID:context.sessionID});
+  if (['match-worker','match-discovery'].includes(parent.agent)) throw new Error('Restricted children cannot orchestrate');
+  if (input.op === 'open') {
+    // Resolve the host's configured model before opening a run or making a claim.
+    // open itself performs only local preflight/state initialization, not claims.
+    let result, pulse;
+    try {
+      result = await host('stream', {...input,parent:parent.id}, context.signal);
+      let pulsing = false;
+      pulse = setInterval(async()=>{
+        if (pulsing) return;
+        pulsing = true;
+        try { await host('stream',{op:'pulse',batch:input.batch,parent:parent.id}); }
+        catch {
+          clearInterval(pulse);
+          try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* watchdog lease catches process loss */ }
+          try { await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:
+            `Matchflow ${input.batch} producer supervision failed; reconcile, never resume.`}); } catch { /* durable monitor owns wake-up */ }
+        } finally { pulsing = false; }
+      },10000);
+      pulse.unref?.();
+      const model = await requireWorkerModel(ctx,result.model);
+      const child = await ctx.session.create({parentID:parent.id,title:`Matchflow ${input.batch} discovery`,
+        agent:'match-discovery',model,permissions:discoveryPermissions});
+      await host('stream',{op:'bind',batch:input.batch,parent:parent.id,session:child.id},context.signal);
+      await ctx.session.prompt({sessionID:child.id,text:
+        `Discover and secure ${result.requested} reviewed functions for this bound run. Use only matchflow_discovery. Start with catalog, inspect final candidates, then enqueue with evidence-backed reason/review. Stream each claim immediately. On backpressure use wait, not repeated status polling. Stop when producer_state is done. If bounded search is exhausted, finish with the actual reason. Never retry ambiguous mutations.`});
+      void ctx.session.wait({sessionID:child.id}).then(async()=>{
+        clearInterval(pulse);
+        const ended = await host('stream',{op:'producer_end',batch:input.batch,parent:parent.id});
+        if (ended.cleanup_required) await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:
+          `Matchflow ${input.batch} discovery ended unexpectedly; STOP and reconcile durable claims, never relaunch.`});
+      }).catch(async()=>{
+        clearInterval(pulse);
+        try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* controller lease expires */ }
+        try { await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:`Matchflow ${input.batch} discovery failed; reconcile.`}); } catch { /* durable monitor owns wake-up */ }
+      });
+      return {...result,discoverySessionID:child.id,monitor:`python tools/matchflow/batch.py monitor ${input.batch}`};
+    } catch (error) {
+      clearInterval(pulse);
+      try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* incomplete open remains explicit; watchdog lease expires */ }
+      throw error;
+    }
+  }
+  if (input.op === 'next') {
+    let task;
+    try { task = await host('stream',{...input,parent:parent.id},context.signal); }
+    catch (error) {
+      // The host may already have reserved the FIFO claim before losing its
+      // response. Never call next again to discover what happened.
+      try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* durable launch lease is the backstop */ }
+      throw error;
+    }
+    if (task.empty) return task;
+    return launch(ctx,host,{batch:input.batch,worker:task.worker},context,task);
+  }
+  return host('stream',{...input,parent:parent.id},context.signal);
 }

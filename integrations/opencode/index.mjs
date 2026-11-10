@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { invoke, launch, workerContext } from './core.mjs';
+import { invoke, launch, stream, workerContext } from './core.mjs';
 import workerSchema from './worker-schema.json' with { type: 'json' };
 
 const script = fileURLToPath(new URL('../../tools/matchflow/broker.py', import.meta.url));
@@ -31,6 +31,34 @@ const plugin = {
       await ctx.session.hook(kind, event => workerContext(event, host));
     }
     await ctx.tool.transform(editor => {
+      editor.add({
+        name: 'matchflow_stream',
+        description: 'Orchestrator only: open an authorized streaming run, start its restricted claim-discovery producer, consume next FIFO claim into a matching worker, or inspect status. Start background batch monitor immediately after open. No automatic refills or retries.',
+        input: {type:'object',additionalProperties:false,properties:{
+          op:{type:'string',enum:['open','next','status']},batch:{type:'string'},
+          requested:{type:'integer',minimum:1,maximum:50},backlog:{type:'integer',minimum:1,maximum:4},model:{type:'string'},
+        },required:['op','batch']},
+        options:{codemode:false},
+        execute:async(input,context)=>{
+          await ctx.permission.assert({sessionID:context.sessionID,agent:context.agent,
+            action:'matchflow_stream',resources:['*'],save:[]});
+          return {content:JSON.stringify(await stream(ctx,host,input,context))};
+        },
+      });
+      editor.add({
+        name:'matchflow_discovery',
+        description:'Bound discovery producer only. catalog (at most four pages), inspect(address), enqueue(address,reason,review), wait (local backlog wait), finish(reason), status. Host claims reviewed exact targets and enqueues acknowledged claims. No shell, raw service, credentials, source inspection, child sessions or alternate run paths.',
+        input:{type:'object',additionalProperties:false,properties:{
+          op:{type:'string',enum:['catalog','inspect','enqueue','wait','finish','status']},
+          data:{type:'object',additionalProperties:true},
+        },required:['op']},
+        options:{codemode:false},
+        execute:async(input,context)=>{
+          await ctx.permission.assert({sessionID:context.sessionID,agent:context.agent,
+            action:'matchflow_discovery',resources:['*'],save:[]});
+          return {content:JSON.stringify(await host('discovery',{session:context.sessionID,op:input.op,data:input.data||{}},context.signal))};
+        },
+      });
       editor.add({
         name: 'matchflow_launch',
         description: 'Orchestrator only: launch ONE prepared fixed-address assignment as a restricted child subagent. Requires dispatch and fresh successful online preflight. Makes a real claim; use only when the human requests matching work.',

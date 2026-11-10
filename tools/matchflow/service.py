@@ -27,7 +27,8 @@ def claim(folder, worker, api=request):
             body.get('cowork') is not False or body.get('context_mode') != 'resume' or 'band' in body):
         raise ValueError('claim body differs from dispatched address/model/claim policy')
     info = api('function_info', {'address': state['address']})
-    if info.get('state') != 'open' or (info.get('regions') or {}).get('co_workers', 0):
+    if (info.get('address') != state['address'] or info.get('state') != 'open' or
+            info.get('co_workers', 0) or (info.get('regions') or {}).get('co_workers', 0)):
         life.blocked(folder, worker, 'fixed target unavailable; no replacement or claim made')
         return dict(outcome='blocked', claim_id=None, address=state['address'])
     # Spend the one-attempt reservation BEFORE the network mutation. A crash or

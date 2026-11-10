@@ -22,7 +22,8 @@ The local OpenCode bridge loads the repository policy and official service guide
 and connects the `f3decomp` MCP server using an external key-file reference. On a
 fresh installation run `python tools/matchflow/bootstrap.py` after configuring the
 workspace. If service tools are absent, report the missing bridge/connection, not
-that selecting functions is undefined. Do not fabricate targets or delegate selection.
+that selecting functions is undefined. Do not fabricate targets. Streaming discovery
+may be delegated only to the host-bound restricted `match-discovery` producer.
 
 Selection starts with the service's `start_here`, `status`, `list_bands`,
 `list_functions` and `function_info` tools, without claiming for screening. Review
@@ -31,19 +32,36 @@ then prepare reviewed selection/status JSON and use the pipeline command referen
 Code/configuration tests never authorize claims or paid worker launches. Start those
 only when the user requests them. Keep all runtime artifacts in the external workspace.
 
+For an authorized streaming run use `matchflow_stream` open with a fresh batch name,
+`requested` 1..50, `backlog` 1..4 (default 2) and optional `model`. Open freezes the
+header/config fingerprint, validates the resolved model, starts the watchdog and binds
+the discovery producer. Immediately start `python tools/matchflow/batch.py monitor BATCH`
+in the background. Do not rerun preflight during an active run. Discovery is bounded to
+four catalog pages and at most 4*N shortlist inspections, with actual receipts/local
+history. Only host-validated reviewed enqueues reserve tasks and claim exact addresses.
+`matchflow_stream` next consumes one FIFO acknowledged claim and launches a bound worker
+without another claim; status is read-only. Producer_done means N acknowledged claims,
+not N consumer assignments or closures. Explicit exhaustion may end discovery short.
+Pre-claim unavailability may be skipped without counting; startup failure requires STOP
+and explicit reconciliation, never replacement or ambiguous mutation retries. Keep the
+immutable `batch.json` header and append-only `stream_tasks`; use `lifecycle.manifest`
+for the combined view. The reviewed prepare/dispatch path remains available.
+
 Use `operator_cli.py` for status snapshots, review templates/evidence-backed selections,
 and bounded read-only ledger/lifecycle inspection; use `batch.py audit-worker` and
 `debrief` for closure summaries. Do not reimplement these steps as temp-folder scripts.
 New reusable capabilities belong in this repository with offline tests. Review facts
 remain human/agent annotations; never re-date copied service facts to make them fresh.
 
-Matching launches use `matchflow_launch` and the dedicated `match-worker` agent only.
+Matching launches use `matchflow_stream` next or prepared `matchflow_launch`, and the
+dedicated `match-worker` agent only.
 The host binds each child session before its first prompt. Do not dispatch matching
 through general subagents, headless CLI or Workflows; those legacy paths are disabled.
 Workers have no shell or raw service access. All edits/checks go through session-scoped
 tools. Never broaden permissions or edit tooling to work around a worker refusal.
 
-Worker model resolution is `prepare --model` > local `worker_model` > built-in default.
+Worker model resolution is stream open `model` or `prepare --model`, then local
+`worker_model`, then built-in default.
 Do not assume another user's provider access. Launch validates the exact prepared model
 and variant before child creation/claim; fix configuration or prepare a new reviewed
 batch if unavailable, never silently substitute a model or mutate an assignment.
@@ -57,6 +75,8 @@ batch if unavailable, never silently substitute a model or mutate an assignment.
   `F3_MATCHFLOW_WORKSPACE` environment variable. Workspace paths must be external.
 - Run offline tests before pushing. No paid workers, real claims or service
   mutations as tests unless the user explicitly requests them.
-- Do not modify the external workspace while another worker is running. Preserve
+- While workers run, allow only isolated new assignment/receipt writes and normal scoped
+  worker evidence writes. Do not change shared tooling, configuration or inputs. Streaming
+  checks the frozen configuration fingerprint without rerunning active preflight. Preserve
   historical artifacts and user changes. No automatic replay or claim retries.
 - New repositories use `master` as the default branch.

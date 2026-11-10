@@ -44,6 +44,17 @@ def save(path, value):
             temp.unlink()
 
 
+def manifest(folder):
+    """Immutable header plus append-only streaming tasks; legacy manifests unchanged."""
+    folder = Path(folder)
+    value = load(folder/'batch.json')
+    if value.get('streaming'):
+        with transaction(folder) as db:
+            value['tasks'] = [json.loads(r[0]) for r in db.execute(
+                'SELECT payload FROM stream_tasks ORDER BY seq')]
+    return value
+
+
 @contextmanager
 def transaction(folder):
     db = sqlite3.connect(str(Path(folder) / 'lifecycle.sqlite3'), timeout=30)
@@ -447,6 +458,9 @@ def tick(folder, watcher):
             raise ValueError('watchdog already assigned; reconcile lost supervisor, do not restart')
         control.update(watcher=watcher, heartbeat=time.monotonic())
         db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(control),))
+        if control.get('stream'):
+            from streaming import supervise
+            supervise(db,folder)
         for row in db.execute('SELECT id,payload FROM workers').fetchall():
             state = json.loads(row['payload'])
             if state['state'] == 'closed':
@@ -478,7 +492,9 @@ def watch(folder, watcher=None):
             print(json.dumps(notice), flush=True)
         with transaction(folder) as db:
             states = [json.loads(r[0]) for r in db.execute('SELECT payload FROM workers')]
-        if all(s['state'] == 'closed' or s.get('escalated') for s in states):
+            control = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()[0])
+        producing = control.get('stream', {}).get('producer_state') == 'running'
+        if not producing and all(s['state'] == 'closed' or s.get('escalated') for s in states):
             return
         time.sleep(5)  # Local deadline watchdog, not polling remote workers/service.
 

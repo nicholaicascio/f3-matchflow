@@ -168,7 +168,7 @@ class Controls(unittest.TestCase):
 
     def api(self, tool, body):
         if tool == 'function_info':
-            return dict(state='open', regions=dict(co_workers=0))
+            return dict(state='open', address=body['address'], regions=dict(co_workers=0))
         if tool == 'claim':
             return dict(claim_id='clm_fixture')
         if tool == 'status':

@@ -60,7 +60,8 @@ The setup guide explains Windows versus WSL paths and supplies a complete config
 
 Workers are not tied to OpenCode Go. Set `worker_model` in your ignored
 `matchflow.local.json` to an available tool-capable chat model (`provider/model`, optionally
-`#variant`). `batch.py prepare --model` overrides that setting for one batch. The launcher
+`#variant`). The optional `model` on `matchflow_stream` open, or `batch.py prepare --model`
+for the prepared-batch path, overrides that setting for one batch. The launcher
 checks OpenCode's active catalog before creating a child or taking a claim and rejects
 unavailable models/variants without fallback. See [model setup](docs/setup.md#choosing-a-worker-model).
 
@@ -70,6 +71,17 @@ put private runtime data in the checkout.
 
 ## How it works
 
+- For human-authorized streaming runs, `matchflow_stream` opens a frozen batch with
+  `requested` 1..50 and `backlog` 1..4 (default 2), validates the resolved model, starts
+  the watchdog and binds a restricted `match-discovery` producer. Immediately start
+  `python tools/matchflow/batch.py monitor BATCH` as a background host command.
+- The producer reviews bounded catalog evidence through `matchflow_discovery`; the
+  host validates each reviewed exact target, reserves a task, claims it and queues the
+  acknowledgement. `matchflow_stream` next consumes one FIFO acknowledged claim and
+  launches its bound `match-worker` without claiming again. Status is read-only.
+- Streaming keeps an immutable `batch.json` header plus append-only `stream_tasks`;
+  `lifecycle.manifest` provides their combined view. Producer completion counts claims
+  acknowledged, not workers launched or closed. No replacements or mutation retries.
 - `screen.py` saves a bounded read-only shortlist. Review history and report scope before
   selecting; neither a saved draft nor a near-miss count proves a target is ready.
 - `operator_cli.py` provides status snapshots, review templates, evidence-backed selections
@@ -81,11 +93,20 @@ put private runtime data in the checkout.
 - Workers use session-scoped tools only: own files, read-only context/references, official
   checks, notes and own-claim closure. No shell, credentials, sibling access or selection.
 
+The existing reviewed prepare/dispatch/`matchflow_launch` path remains available.
+Streaming startup failures require STOP and explicit reconciliation, not replacement.
+Configuration, tooling and shared inputs stay frozen during runs; isolated new assignments
+and receipts may be written while workers run. See the runbook for streaming bounds and
+the distinction between producer, consumer and closure completion.
+
 This is a tool-capability boundary, **not an OS sandbox**. Trusted host plugins have
 host authority. General/headless/Workflow matching launch paths are disabled. Local
 MATCH, submitted and server-verified are distinct states.
 
 ## Tested
+
+The live results below describe the prepared-batch path, not streaming validation.
+Documentation changes do not authorize live streaming tests, claims or paid launches.
 
 One live end-to-end run in November 2026 (batch `nov10-b20`, 20 workers,
 `opencode-go/deepseek-v4.1-flash#max`) exercised the full path: bounded screen,

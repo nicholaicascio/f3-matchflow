@@ -174,8 +174,150 @@ def monitor(name):
     supervisor failure, or all workers closing, so the harness notifies the parent.
     """
     path = batch_path(name)
-    tasks = load(path/'batch.json')['tasks']
     while True:
+        manifest = lifecycle.manifest(path)
+        tasks = manifest['tasks']
+        if manifest.get('streaming'):
+            # The helper refreshes the manifest on every pass. Read the queue again
+            # under the control lock: a producer may append between those reads.
+            with lifecycle.transaction(path) as db:
+                from streaming import supervise
+                supervise(db,path)
+                row = db.execute('SELECT payload FROM control WHERE id=1').fetchone()
+                if not row:
+                    raise ValueError('dispatch before monitoring')
+                control = json.loads(row['payload'])
+                queue = db.execute('SELECT worker,payload,state FROM stream_tasks ORDER BY seq').fetchall()
+                tasks = [json.loads(item['payload']) for item in queue]
+                states = []
+                for task in tasks:
+                    row = db.execute('SELECT payload FROM workers WHERE id=?', (task['id'],)).fetchone()
+                    # Preparing/failed entries may not have a lifecycle worker yet.
+                    # They remain unresolved, never disappear from the completion set.
+                    states.append(json.loads(row['payload']) if row else None)
+
+                def event(key, value):
+                    seen = control.setdefault(key, [])
+                    if value in seen:
+                        return False
+                    seen.append(value)
+                    db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(control),))
+                    return True
+
+                stream = control.get('stream', {})
+                producer = stream.get('producer_state')
+                active = producer not in ('done', 'failed') or any(
+                    state is None or state['state'] != 'closed' for state in states)
+                heartbeat = control.get('heartbeat')
+                safety = []
+                if (path/'STOP').exists():
+                    safety.append(dict(event='stop'))
+                if active and (heartbeat is None or not 0 <= time.monotonic()-heartbeat <= 30):
+                    safety.append(dict(event='supervisor_lost'))
+                for key in ('cleanup_barrier', 'start_barrier'):
+                    if control.get(key):
+                        safety.append(dict(event=key, detail=control[key]))
+                fresh_safety = [item for item in safety if event('monitor_seen_safety', item)]
+                if fresh_safety:
+                    return dict(state='supervisor_lost' if any(
+                        item['event'] == 'supervisor_lost' for item in fresh_safety) else 'closure_requested',
+                        events=fresh_safety, workers=[], cleanup_required=True,
+                        note='Safety barrier active; reconcile before starting more workers.')
+                due = [dict(worker=task['id'], claim_id=state.get('claim_id'),
+                            session_id=state.get('session_id'), phase=lifecycle.phase(state))
+                       for task, state in zip(tasks, states) if state and state['state'] != 'closed' and
+                       (state.get('closure_requested') or lifecycle.phase(state) != 'experiment' or
+                        (path/task['id']/'CLOSE_REQUESTED.json').exists() or (path/'STOP').exists())]
+                fresh_due = [item for item in due if event('monitor_seen', item)]
+                if fresh_due:
+                    return dict(state='closure_requested', workers=fresh_due, cleanup_required=True,
+                                note='Re-arm monitor for new requests or escalation; no replacement starts.')
+                # Read help directly, including newly appended workers not present
+                # in the immutable header used by legacy help_requests().
+                requests = db.execute("SELECT worker,payload FROM escalations WHERE state='pending' ORDER BY seq").fetchall()
+                pending = [dict(json.loads(row['payload']), worker=row['worker'], state='pending') for row in requests]
+                fresh_help = [item for item in pending if event('monitor_seen_help', item['request_id'])]
+                if fresh_help:
+                    return dict(state='worker_help_requested', workers=fresh_help, cleanup_required=False,
+                                note='Answer the worker help request, then re-arm the monitor.')
+                if producer == 'failed' and event('monitor_seen_stream', dict(event='producer_failed')):
+                    return dict(state='producer_failed', stream=stream, cleanup_required=True,
+                                note='Discovery failed; preserve unresolved tasks and reconcile before new starts.')
+                unresolved = [dict(worker=item['worker'], state=item['state'],
+                                   reason='Incomplete stream assignment; reconcile, never replay preparation or claiming.')
+                              for item, task in zip(queue, tasks) if item['state'] == 'failed' or
+                              (producer in ('done', 'failed') and item['state'] in ('preparing', 'claiming')) or
+                              (item['state'] == 'queued' and not task.get('assignment_sha256'))]
+                fresh_unresolved = [item for item in unresolved if event('monitor_seen_unresolved', item)]
+                if fresh_unresolved:
+                    return dict(state='stream_tasks_unresolved', workers=fresh_unresolved, cleanup_required=True,
+                                note='Unresolved queue rows remain part of the batch; no automatic retries or replacements.')
+                # Already-notified safety requests still suppress launch signals.
+                if not safety and not due and not unresolved and producer != 'failed':
+                    queued = [dict(worker=item['worker'], address=task['address'])
+                              for item, task in zip(queue, tasks) if item['state'] == 'queued']
+                    available = [item for item in queued if event('monitor_seen_queue', item)]
+                    if available:
+                        return dict(state='queue_available', workers=available, cleanup_required=False,
+                                    note='Reviewed queued assignments available; launch only these exact workers.')
+                claimed = stream.get('claimed', sum(bool(state and state.get('claim_id')) for state in states))
+                if producer == 'done' and claimed < stream.get('requested', 0):
+                    exhausted = dict(event='producer_exhausted', requested=stream['requested'],
+                                     claimed=claimed, prepared=len(tasks))
+                    if event('monitor_seen_stream', exhausted):
+                        return dict(state='producer_exhausted', **exhausted, cleanup_required=False,
+                                    note='Discovery ended before the requested count; unresolved tasks still require closure.')
+                # Retain this exact snapshot for evidence checks outside the DB lock.
+                snapshot = [(task, state, item['state']) for task, state, item in zip(tasks, states, queue)]
+
+            from service import closing_notes_record
+            from evidence import local_completion
+            complete = []
+            for task, state, queue_state in snapshot:
+                if state is None or state['state'] != 'closed' or queue_state in ('preparing', 'claiming', 'failed'):
+                    continue
+                try:
+                    notes_done = closing_notes_record(path, task['id'], state)['status'] in ('acknowledged', 'not_applicable')
+                    report_done = notes_done and local_completion(path, task, state)['complete']
+                except (ValueError, OSError):
+                    report_done = False
+                if report_done:
+                    complete.append(dict(worker=task['id'], event='worker_complete', claim_id=state.get('claim_id'),
+                                         session_id=state.get('session_id')))
+            # Evidence checks can take time. Revalidate producer, full queue and
+            # ownership under the lock before recording any completion decision.
+            all_complete = False
+            with lifecycle.transaction(path) as db:
+                current = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()['payload'])
+                latest_queue = db.execute('SELECT worker,payload,state FROM stream_tasks ORDER BY seq').fetchall()
+                latest_states = []
+                for task in tasks:
+                    row = db.execute('SELECT payload FROM workers WHERE id=?', (task['id'],)).fetchone()
+                    latest_states.append(json.loads(row['payload']) if row else None)
+                control_changed = any(current.get(key) != control.get(key)
+                                      for key in ('cleanup_barrier', 'start_barrier')) or (
+                    current.get('stream', {}).get('producer_state') != producer)
+                if (control_changed or latest_states != states or
+                        [tuple(row) for row in latest_queue] != [tuple(row) for row in queue]):
+                    continue
+                heartbeat = current.get('heartbeat')
+                stale = active and (heartbeat is None or not 0 <= time.monotonic()-heartbeat <= 30)
+                closed_set = all(state is not None and state['state'] == 'closed' for state in states)
+                if not stale and (not (path/'STOP').exists() or closed_set):
+                    seen = current.setdefault('monitor_seen_milestones', [])
+                    new = [item for item in complete if item not in seen]
+                    if new:
+                        seen.extend(new)
+                        db.execute('UPDATE control SET payload=? WHERE id=1', (json.dumps(current),))
+                        return dict(state='worker_milestones', events=new,
+                                    note='Notes and report complete; re-arm while discovery or other workers remain.')
+                    if not unresolved and producer in ('done', 'failed') and len(complete) == len(tasks):
+                        all_complete = True
+            if all_complete:
+                return dict(state='all_complete', debrief=debrief(name),
+                            note='Producer ended and every task has complete notes and report; audit fresh official status.')
+            time.sleep(5)
+            continue
         with lifecycle.transaction(path) as db:
             row = db.execute('SELECT payload FROM control WHERE id=1').fetchone()
             if not row:
@@ -249,7 +391,7 @@ def monitor(name):
 def help_requests(name, worker=None):
     """List durable worker help requests without touching a running session."""
     path = batch_path(name)
-    tasks = load(path/'batch.json')['tasks']
+    tasks = lifecycle.manifest(path)['tasks']
     if worker is not None and worker not in {t['id'] for t in tasks}:
         raise ValueError('unknown prepared worker')
     requests, responses = [], []
@@ -270,7 +412,7 @@ def answer(name, worker, text, request_id=None):
     if not re.fullmatch(r'worker[0-9]{2,3}', worker):
         raise ValueError('canonical prepared worker required')
     path = batch_path(name)
-    if not any(t['id'] == worker for t in load(path/'batch.json')['tasks']):
+    if not any(t['id'] == worker for t in lifecycle.manifest(path)['tasks']):
         raise ValueError('unknown prepared worker')
     state = lifecycle.snapshot(path, worker)
     if state['state'] != 'claimed':
@@ -295,7 +437,7 @@ def audit(name, status_path, expected=None):
     status = snapshot['status']
     opened = {r['claim_id'] for r in status['open_claims']}
     rows = []
-    manifest = load(path/'batch.json')
+    manifest = lifecycle.manifest(path)
     if manifest.get('batch') != name:
         raise ValueError('batch identity mismatch')
     if expected is not None:
@@ -338,7 +480,7 @@ def audit(name, status_path, expected=None):
 def debrief(name, status_path=None):
     """Compact local evidence summary. Never claims, checks or polls the service."""
     path = batch_path(name)
-    manifest = load(path/'batch.json')
+    manifest = lifecycle.manifest(path)
     if manifest.get('batch') != name:
         raise ValueError('batch identity mismatch')
     audited = audit(name, status_path) if status_path else None

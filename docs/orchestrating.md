@@ -10,14 +10,85 @@ paid agents or take service claims to test the installation.
 - The **human** approves the account, supplies their own game and chooses whether to
   pay for matching work.
 - The **orchestrator** runs here, screens without claiming, reviews exact addresses,
-  prepares assignments and supervises closure. It has trusted host authority and must
+  opens authorized streams or prepares assignments and supervises closure. It has trusted host authority and must
   not use it to bypass worker restrictions.
+- The streaming **match-discovery** child is bound by the host before its first prompt.
+  It reviews exact targets through `matchflow_discovery` only; it has no shell, raw
+  service access, credentials, source inspection or alternate launch path.
 - Each **match-worker** child is bound to one immutable assignment and real session
   identity before its first prompt. It uses only `matchflow_worker` operations. Its
   editable area is `WORKSPACE/work/batches/BATCH/workerNN/files/`, even though the host
   plugin is loaded from this checkout. No shell or arbitrary temp scripts.
 
-## 1. Screen, review and prepare
+## Streaming authorized runs
+
+Use this path only for a human-requested matching run. The reviewed prepared-batch path
+below remains available. Before opening, with no active workers, pass fresh online
+preflight and resolve the external workspace. Do not use a live run as a setup test.
+
+Call the orchestrator tool **`matchflow_stream`**, not a shell command:
+
+```json
+{"op":"open","batch":"YOUR_FRESH_BATCH_NAME","requested":20,"backlog":2}
+```
+
+`requested` is 1..50; backlog is 1..4, default 2. Optional `model` overrides local
+`worker_model`, otherwise the built-in default applies when that setting is absent.
+Open freezes the batch header and configuration fingerprint, validates the exact
+tool-capable model/variant, starts the watchdog and starts a bound `match-discovery`
+producer. No silent model fallback is permitted.
+
+**Immediately after open**, run this as a background host command with completion
+notification, keeping the parent available for its events:
+
+```text
+python tools/matchflow/batch.py monitor BATCH
+```
+
+The producer uses `matchflow_discovery` catalog (initial start_here/status/list_bands,
+at most four catalog pages), then inspect on a shortlist of at most 4*N targets for
+requested N. Inspect preserves actual receipts and local history. Review availability,
+ownership, substantive history, verdicts and report scope under policy, including a
+next experiment and integration plan where required. No claim is taken just to screen.
+
+Producer enqueue sends the exact address, reason and review. The host validates facts
+and fresh metadata, reserves the task, claims that exact address, saves acknowledgement
+and queues it. Pre-claim unavailability may be skipped without counting toward N.
+Producer wait is a bounded local backlog wait; finish explicitly records exhaustion;
+status is read-only. Exhaustion may end the run short rather than expanding bounds.
+
+As queued claims become available, call:
+
+```json
+{"op":"next","batch":"YOUR_FRESH_BATCH_NAME"}
+```
+
+Each next consumes one FIFO acknowledged claim and launches a bound `match-worker`
+using that claim, without a second claim. Do not use `matchflow_launch` to consume a
+stream task. `matchflow_stream` status is read-only:
+
+```json
+{"op":"status","batch":"YOUR_FRESH_BATCH_NAME"}
+```
+
+At quota, `producer_done` means N acknowledged claims. It does not mean the consumer
+has assigned N workers, nor that workers closed or reports/notes are complete. Retain
+the immutable `batch.json` header and append-only `stream_tasks`; readers use
+`lifecycle.manifest` for the combined view, not a cached header-only worker list.
+
+The monitor supervises the dynamic queue and workers, coalesces routine completions,
+and prioritizes STOP, cleanup, heartbeat loss and other urgent events. Re-arm it after
+notifications while discovery, queued work or workers remain. Startup failures require
+STOP and explicit reconciliation, not a replacement task. Never retry ambiguous
+mutations or automatically resume/refill. Follow the closure/recovery sections below.
+
+The frozen configuration fingerprint is checked during the run. Do not rerun preflight
+while active or change shared tooling, configuration or inputs. Isolated new assignments
+and receipts may be written while workers work, along with their scoped evidence writes.
+
+## Prepared-batch path
+
+### 1. Screen, review and prepare
 
 The official read-only sequence starts with `start_here`, `status`, `list_bands`,
 `list_functions`, then `function_info` for the final shortlist. The screen CLI performs
@@ -52,7 +123,7 @@ batch/output names, never overwrite historical evidence. `prepare` uses your per
 for this batch. With neither set, the legacy OpenCode Go/DeepSeek default remains. Choose
 a provider you have configured; see [model setup](setup.md#choosing-a-worker-model).
 
-## 2. Validate, dispatch and launch
+### 2. Validate, dispatch and launch
 
 Before launching, with no workers active, obtain fresh successful online preflight and
 an actual status snapshot. Setup does not automatically run these again:
@@ -83,11 +154,12 @@ pack and starts the restricted child. Prepare/dispatch do not claim. No replacem
 refills, co-work or automatic reclaims. Never dispatch matching through general agents,
 headless CLI, Workflows or manually constructed child sessions.
 
-## 3. Supervise and close
+## Supervise and close (both paths)
 
 Read monitor notifications. Answer capability/help requests through `batch.py help`
 and `batch.py answer`; do not edit tooling to grant a worker shell access. Re-arm the
-background monitor after a notification while workers remain. `claim_closed` is not
+background monitor after a notification while workers or streaming discovery/queued work
+remain. Routine streaming completions may be coalesced; urgent events take priority. `claim_closed` is not
 the same as `notes_complete` or `report_complete`; only `all_complete` means every
 required report and acknowledged closing note is present.
 

@@ -35,6 +35,9 @@ def registry():
         session TEXT PRIMARY KEY, parent TEXT NOT NULL, folder TEXT NOT NULL,
         worker TEXT NOT NULL, assignment_hash TEXT NOT NULL, manifest_hash TEXT NOT NULL,
         UNIQUE(folder, worker))''')
+    db.execute('''CREATE TABLE IF NOT EXISTS discoveries (
+        session TEXT PRIMARY KEY, folder TEXT NOT NULL UNIQUE, parent TEXT NOT NULL)''')
+    db.commit()
     return db
 
 
@@ -49,7 +52,7 @@ def bind(name, worker, session, parent):
     if session == parent or not re.fullmatch(r'worker[0-9]{2,3}', worker):
         raise ValueError('distinct child and canonical worker required')
     folder = private_root(batch.batch_path(name))
-    manifest = life.load(folder/'batch.json')
+    manifest = life.manifest(folder)
     if manifest.get('schema_version') != 3:
         raise ValueError('only reviewed v3 batches can bind')
     task = next((t for t in manifest['tasks'] if t['id'] == worker), None)
@@ -59,10 +62,18 @@ def bind(name, worker, session, parent):
     if ledger.digest(assignment) != task['assignment_sha256']:
         raise ValueError('assignment changed after preparation')
     state = life.require_start(folder, worker)
+    if manifest.get('streaming'):
+        with life.transaction(folder) as db:
+            import streaming
+            value = streaming.control(db)
+            if value['stream']['parent'] != parent or db.execute(
+                    'SELECT state FROM stream_tasks WHERE worker=?', (worker,)).fetchone()[0] != 'launching':
+                raise ValueError('stream handoff not reserved for this parent')
     if state['method'] != 'subagents':
         raise ValueError('only restricted subagents enabled')
     with closing(registry()) as db, db:
-        if db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone():
+        if (db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone() or
+                db.execute('SELECT 1 FROM discoveries WHERE session=?', (parent,)).fetchone()):
             raise ValueError('a worker cannot launch children')
         db.execute('INSERT INTO bindings VALUES(?,?,?,?,?,?)',
                    (session, parent, str(folder), worker, ledger.digest(assignment), ledger.digest(folder/'batch.json')))
@@ -77,10 +88,13 @@ def task(name, worker, parent):
     if not re.fullmatch(r'worker[0-9]{2,3}', worker):
         raise ValueError('canonical worker required')
     with closing(registry()) as db:
-        if db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone():
+        if (db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone() or
+                db.execute('SELECT 1 FROM discoveries WHERE session=?', (parent,)).fetchone()):
             raise ValueError('workers cannot launch assignments')
     folder = private_root(batch.batch_path(name))
-    manifest = life.load(folder/'batch.json')
+    manifest = life.manifest(folder)
+    if manifest.get('streaming'):
+        raise ValueError('streaming claims must be consumed through stream next')
     batch.validate_selection(manifest['selection'])
     if manifest.get('schema_version') != 3:
         raise ValueError('prepare a v3 batch')
@@ -110,19 +124,77 @@ def binding(session):
     return row, life.load(assignment), state
 
 
+def saved_binding(folder, worker):
+    """Read-only recovery inventory; never initialize a missing registry."""
+    path = private_root(workspace_root()/'work/matchflow')/'bindings.sqlite3'
+    if not path.is_file():
+        return None
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        row = db.execute('SELECT * FROM bindings WHERE folder=? AND worker=?',(str(Path(folder)),worker)).fetchone()
+    return dict(row) if row else None
+
+
+def reconcile_unprompted_binding(folder, worker, session):
+    """Explicit host repair for registry commit followed by lost lifecycle bind.
+
+    No service mutation or session execution. STOP plus absence of setup admission
+    proves the capability could never have reached a matching prompt.
+    """
+    session_id(session)
+    folder = Path(folder)
+    import streaming
+    row = saved_binding(folder,worker)
+    if not row or row['session'] != session:
+        raise ValueError('exact saved capability binding required; never guess a session')
+    if (ledger.digest(folder/worker/'assignment.json') != row['assignment_hash'] or
+            ledger.digest(folder/'batch.json') != row['manifest_hash']):
+        raise ValueError('partial binding hashes differ from immutable assignment')
+    with life.transaction(folder) as db:
+        value = streaming.control(db)
+        state = life.read_worker(db,worker)
+        queued = db.execute('SELECT state FROM stream_tasks WHERE worker=?',(worker,)).fetchone()
+        if (not (value.get('start_barrier') or value.get('cleanup_barrier') or (folder/'STOP').exists()) or
+                row['parent'] != value['stream']['parent'] or not queued or queued[0] != 'launching' or
+                state.get('session_id') is not None or state.get('setup_started') or state['state'] != 'claimed'):
+            raise ValueError('not a stopped, unprompted partial binding')
+        proof = dict(session_id=session,parent=row['parent'],assignment_hash=row['assignment_hash'],
+                     manifest_hash=row['manifest_hash'],reconciled_utc=life.stamp())
+        state.update(session_id=session, unprompted_binding=proof)
+        life.write_worker(db,worker,state)
+    return proof
+
+
 def start(session, api=service.request, acquire=None):
     """Host-only just-in-time claim. Never callable by the matching worker tool."""
     row, assignment, state = binding(session)
     folder, worker = Path(row['folder']), row['worker']
+    with life.transaction(folder) as db:
+        current = life.read_worker(db,worker)
+        if current.get('setup_started'):
+            raise ValueError('host setup already started; reconcile, never replay')
+        current['setup_started'] = life.stamp()
+        life.write_worker(db,worker,current)
     try:
         from preflight import require
         life.setup_step(folder, worker, 'preflight')
-        require()
+        if life.load(folder/'batch.json').get('streaming'):
+            import streaming
+            with life.transaction(folder) as db:
+                streaming.guard(folder, streaming.control(db))
+        else:
+            require()
         life.require_experiment(folder, worker)
         life.setup_step(folder, worker, 'capacity')
-        batch.capacity(dict(checked_at=life.stamp(), status=api('status', {})), 1)
-        life.setup_step(folder, worker, 'claim')
-        result = service.claim(folder, worker, api=api)
+        if life.load(folder/'batch.json').get('streaming'):
+            # Discovery has already reserved and acknowledged the exact claim.
+            status = api('status', {})
+            service.owned(status, state['claim_id'], state['address'])
+            result = dict(claim_id=state['claim_id'])
+        else:
+            batch.capacity(dict(checked_at=life.stamp(), status=api('status', {})), 1)
+            life.setup_step(folder, worker, 'claim')
+            result = service.claim(folder, worker, api=api)
         if result.get('outcome') == 'blocked':
             evidence.report(folder, worker, db_path=ledger.DEFAULT_DB)
             return result
@@ -155,10 +227,11 @@ def failure(name, worker, session, parent, reason='launch_failed'):
     if reason not in ('launch_failed', 'prompt_failed') or not re.fullmatch(r'worker[0-9]{2,3}', worker):
         raise ValueError('invalid host failure context')
     with closing(registry()) as db:
-        if db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone():
+        if (db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone() or
+                db.execute('SELECT 1 FROM discoveries WHERE session=?', (parent,)).fetchone()):
             raise ValueError('workers cannot request host launch failure operations')
     folder = private_root(batch.batch_path(name))
-    manifest = life.load(folder/'batch.json')
+    manifest = life.manifest(folder)
     if not any(t['id'] == worker for t in manifest['tasks']):
         raise ValueError('unknown prepared worker')
     return life.request_cleanup(folder, worker, reason)
@@ -273,7 +346,7 @@ def _worker_call(session, op, data, api=service.request):
             notes_complete = state['state'] == 'closed' and service.closing_notes_record(folder, worker, state)['status'] in ('acknowledged', 'not_applicable')
         except ValueError:
             notes_complete = False
-        task = next(t for t in life.load(folder/'batch.json')['tasks'] if t['id'] == worker)
+        task = next(t for t in life.manifest(folder)['tasks'] if t['id'] == worker)
         report_complete = evidence.local_completion(folder, task, state)['complete']
         return dict(worker=worker, address=state['address'], session_id=session, claim_id=cid,
                     state=state['state'], outcome=state.get('outcome'),
@@ -498,9 +571,57 @@ def _worker_call(session, op, data, api=service.request):
     raise ValueError('operation not available to workers')
 
 
+def stream_call(value):
+    """Plugin-only parent operations; discovery never chooses a run or host path."""
+    import streaming
+    parent = session_id(value['parent'])
+    with closing(registry()) as db:
+        if (db.execute('SELECT 1 FROM bindings WHERE session=?', (parent,)).fetchone() or
+                db.execute('SELECT 1 FROM discoveries WHERE session=?', (parent,)).fetchone()):
+            raise ValueError('restricted children cannot orchestrate streams')
+    op = value['op']
+    if op == 'open':
+        return streaming.open_run(value['batch'], value['requested'], parent, value.get('model'), value.get('backlog', 2))
+    folder = private_root(batch.batch_path(value['batch']))
+    with life.transaction(folder) as db:
+        control = streaming.control(db)
+        if control['stream']['parent'] != parent:
+            raise ValueError('stream belongs to another parent')
+    if op == 'status':
+        return streaming.status(folder)
+    if op == 'pulse':
+        with life.transaction(folder) as db:
+            control = streaming.control(db)
+            # A late heartbeat cannot revive a lost controller or extend leases.
+            streaming.supervise(db,folder)
+            control = streaming.control(db)
+            streaming.guard(folder,control)
+            control['stream']['producer_heartbeat'] = life.time.monotonic()
+            streaming.put_control(db,control)
+        return dict(alive=True)
+    if op == 'bind':
+        return streaming.bind_discovery(value['batch'], value['session'], parent)
+    if op == 'next':
+        return streaming.next_task(value['batch'], parent)
+    if op == 'assigned':
+        streaming.assigned(folder,value['worker'])
+        return dict(assigned=True)
+    if op == 'producer_end':
+        with life.transaction(folder) as db:
+            control = streaming.control(db)
+            failed = control['stream']['producer_state'] == 'running'
+        if failed:
+            streaming.stop(folder,'producer_ended_before_finish')
+        return dict(cleanup_required=failed)
+    if op == 'fail':
+        streaming.stop(folder,'producer_or_launch_failed')
+        return dict(cleanup_required=True)
+    raise ValueError('unknown parent stream operation')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['task', 'bind', 'start', 'worker', 'completion', 'failure'])
+    parser.add_argument('command', choices=['task', 'bind', 'start', 'worker', 'completion', 'failure', 'stream', 'discovery'])
     args = parser.parse_args()
     value = {}
     try:
@@ -510,7 +631,12 @@ def main():
         value = json.loads(text)
         if not isinstance(value, dict):
             raise ValueError('host input must be an object')
-        if args.command == 'task':
+        if args.command == 'stream':
+            result = stream_call(value)
+        elif args.command == 'discovery':
+            import streaming
+            result = streaming.discover(value['session'], value['op'], value.get('data', {}))
+        elif args.command == 'task':
             result = task(value['batch'], value['worker'], value['parent'])
         elif args.command == 'bind':
             result = bind(value['batch'], value['worker'], value['session'], value['parent'])

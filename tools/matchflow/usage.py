@@ -60,7 +60,7 @@ def headless_events(path):
 
 def collect(folder, method, input_path=None, semantics='unknown'):
     folder = Path(folder)
-    manifest = life.load(folder / 'batch.json')
+    manifest = life.manifest(folder)
     snapshot = life.load(input_path) if input_path else None
     if method == 'workflow':
         snapshot = snapshot.get('data', snapshot)
