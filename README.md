@@ -85,6 +85,41 @@ This is a tool-capability boundary, **not an OS sandbox**. Trusted host plugins 
 host authority. General/headless/Workflow matching launch paths are disabled. Local
 MATCH, submitted and server-verified are distinct states.
 
+## Tested
+
+One live end-to-end run in November 2026 (batch `nov10-b20`, 20 workers,
+`opencode-go/deepseek-v4.1-flash#max`) exercised the full path: bounded screen,
+reviewed selection, immutable prepare, online preflight, status snapshot, dispatch,
+20 restricted launches, background monitoring, per-worker audits and a final debrief.
+
+| Measure | Result |
+|---|---|
+| Assignments | 20 |
+| Local exact matches submitted | 19 |
+| Server verified | 19 |
+| Given up | 1 (2-instruction register-only near miss) |
+| Claims closed / strikes | 20 / 0 |
+| Wall time, dispatch to last closure | 32 minutes |
+| Input / output / reasoning tokens | 1,420,849 / 101,764 / 353,814 |
+| Cache-read tokens | 23,032,064 |
+
+The batch deliberately favored small, fresh, clean functions: 17 of the 20 were under
+40 bytes. Most matches landed on the first or second check; the two functions around
+100 bytes and the give-up dominated the wall time. The give-up recorded a proper
+near-miss review and retained its best source for a future pass. End to end, 19 of 20
+assignments produced a server-verified match (95%), with no failed verification and no
+strike.
+
+The process held at the boundaries that matter. Every worker used a bound exact-address
+claim, every check ran through the official checker, and closure evidence was audited
+per worker. One worker's closing-notes request remained locally pending with no server
+receipt. The recovery path correctly refused to replay the ambiguous mutation, so that
+worker's canonical report is missing even though its submission verified. That is the
+intended trade-off: an explicit evidence gap is better than a fabricated receipt.
+
+Token figures are raw session counters and are not additive across categories; billed
+cost is not measured. This is one run, not a benchmark or a guarantee of similar results.
+
 ## Requirements and support
 
 Python 3.10+, Node 22+, OpenCode V2 (tested CLI/plugin SDK **2.2.6**), and separately
