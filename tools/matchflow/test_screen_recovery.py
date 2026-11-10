@@ -102,6 +102,52 @@ class ScreenRecoveryTests(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertEqual(result['count'], 0)
 
+    def test_targeted_screen_uses_exact_addresses_without_catalog_pages(self):
+        calls = []
+        def api(tool, body):
+            calls.append((tool, body))
+            if tool == 'start_here':
+                return dict(notices=[])
+            if tool == 'status':
+                return dict(open_claims=[])
+            if tool == 'list_bands':
+                return dict(bands=[dict(band='<=255', allowed=True, open=2)])
+            if tool == 'function_info':
+                f = next(f for f in self.catalog() if f['address'] == body['address'])
+                return dict(f, state='open', co_workers=0)
+            raise AssertionError('unexpected tool '+tool)
+        result = screen.screen(self.root/'screen', addresses=['0x00123457'], api=api)
+        self.assertEqual([c[0] for c in calls], ['start_here', 'status', 'list_bands', 'function_info'])
+        self.assertTrue(result['complete'])
+        review = life.load(self.root/'screen/review.json')
+        self.assertEqual(review['requested'], 1)
+        self.assertEqual([row['metadata']['address'] for row in review['shortlist']], ['0x00123457'])
+        self.assertFalse(review['shortlist'][0]['history_reviewed'])
+        with self.assertRaisesRegex(ValueError, 'canonical 0x addresses'):
+            screen.screen(self.root/'screen2', addresses=['1234'], api=api)
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            screen.screen(self.root/'screen3', addresses=['0x00123457', '0x00123457'], api=api)
+        with self.assertRaisesRegex(ValueError, 'addresses 1..50'):
+            screen.screen(self.root/'screen4', addresses=[], api=api)
+
+    def test_targeted_screen_skips_held_or_disallowed_band_without_replacement(self):
+        def api(tool, body):
+            if tool == 'start_here':
+                return dict(notices=[])
+            if tool == 'status':
+                return dict(open_claims=[])
+            if tool == 'list_bands':
+                return dict(bands=[dict(band='<=255', allowed=True, open=2)])
+            if tool == 'function_info':
+                return dict(address=body['address'], state='open', co_workers=1, size=100,
+                            band='<=255', give_ups=0, open_problem_reports=0,
+                            file_problem_reports=0, failed_verifications=0)
+            raise AssertionError(tool)
+        result = screen.screen(self.root/'screen', addresses=['0x00123456'], api=api)
+        self.assertFalse(result['complete'])
+        self.assertEqual(result['count'], 0)
+        self.assertEqual(life.load(self.root/'screen/review.json')['shortlist'], [])
+
     def recovery_action(self):
         return dict(batch='test', workers=[dict(worker='worker01', address='0x00123456', claim_id='clm_fixture',
                 session_id='ses_child1', session_finished=True, operation='giveup', source='best.cpp',
