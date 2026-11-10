@@ -13,8 +13,11 @@ paid agents or take service claims to test the installation.
   opens authorized streams or prepares assignments and supervises closure. It has trusted host authority and must
   not use it to bypass worker restrictions.
 - The streaming **match-discovery** child is bound by the host before its first prompt.
-  It reviews exact targets through `matchflow_discovery` only; it has no shell, raw
-  service access, credentials, source inspection or alternate launch path.
+  It reviews exact targets through `matchflow_discovery`. Its only other capability is
+  read-only access to OpenCode's saved oversized tool results
+  (`~/.local/share/opencode/tool-output/`), so it can page through a large catalog
+  response. It has no shell, raw service access, credentials, workspace or source
+  reads, or alternate launch path.
 - Each **match-worker** child is bound to one immutable assignment and real session
   identity before its first prompt. It uses only `matchflow_worker` operations. Its
   editable area is `WORKSPACE/work/batches/BATCH/workerNN/files/`, even though the host
@@ -81,6 +84,14 @@ and prioritizes STOP, cleanup, heartbeat loss and other urgent events. Re-arm it
 notifications while discovery, queued work or workers remain. Startup failures require
 STOP and explicit reconciliation, not a replacement task. Never retry ambiguous
 mutations or automatically resume/refill. Follow the closure/recovery sections below.
+
+**Discovery failure cancels the request.** When you are told discovery failed or ended
+unexpectedly, the requested run is cancelled. Reconcile only that run's durable claims
+and workers, let already-launched workers close normally, and report the blocker to the
+human. Do not screen functions yourself, prepare a batch, open another stream or launch
+any worker as a fallback. The host enforces this: after a failed stream, `matchflow_stream`
+open and `matchflow_launch` refuse with "matching request cancelled" for that parent
+session. The human starts a new session for a new request once the cause is fixed.
 
 The frozen configuration fingerprint is checked during the run. Do not rerun preflight
 while active or change shared tooling, configuration or inputs. Isolated new assignments

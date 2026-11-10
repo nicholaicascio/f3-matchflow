@@ -104,6 +104,11 @@ python tools/matchflow/batch.py monitor BATCH
 
 Only the host-bound `match-discovery` session uses `{op,data}`. It has no shell, raw
 service access, credentials, source inspection, child sessions or alternate run paths.
+Its one extra capability is `read` scoped to OpenCode's saved oversized tool results
+(`~/.local/share/opencode/tool-output/*`, or under `XDG_DATA_HOME`): the agent file,
+session permissions and the request hook all allow exactly that. Discovery results are
+written one JSON value per line so a saved catalog page stays readable, because
+OpenCode's `read` truncates lines at 2000 characters.
 
 - `catalog`: initial start_here/status/list_bands, then at most four catalog pages.
 - `inspect`: exact `address` on a shortlist bounded by 4*N for requested N. Preserve
@@ -120,6 +125,9 @@ service access, credentials, source inspection, child sessions or alternate run 
 Unavailability discovered before claiming can be skipped and does not count toward the
 requested total. An ambiguous claim or other mutation is never retried. Startup failure
 requires STOP and explicit reconciliation, never a replacement target or automatic resume.
+A failed stream (`producer_state` failed) cancels its parent's request: `stream_runs` in
+the bindings registry records each run's parent, and the host refuses stream opens and
+prepared `task` launches from that parent with "matching request cancelled".
 Retain reservations and receipts for reviewed recovery, including acknowledged queued
 claims that never reached a worker. Do not infer closure from an empty local queue.
 

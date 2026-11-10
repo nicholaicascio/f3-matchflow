@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { invoke, launch, stream, workerContext } from './core.mjs';
+import { invoke, launch, stream, workerContext, readableJson } from './core.mjs';
 import workerSchema from './worker-schema.json' with { type: 'json' };
 
 const script = fileURLToPath(new URL('../../tools/matchflow/broker.py', import.meta.url));
@@ -56,7 +56,7 @@ const plugin = {
         execute:async(input,context)=>{
           await ctx.permission.assert({sessionID:context.sessionID,agent:context.agent,
             action:'matchflow_discovery',resources:['*'],save:[]});
-          return {content:JSON.stringify(await host('discovery',{session:context.sessionID,op:input.op,data:input.data||{}},context.signal))};
+          return {content:readableJson(await host('discovery',{session:context.sessionID,op:input.op,data:input.data||{}},context.signal))};
         },
       });
       editor.add({

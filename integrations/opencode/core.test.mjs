@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelRef, launch, stream, workerPermissions, discoveryPermissions, invoke, requireWorkerModel } from './core.mjs';
+import { modelRef, launch, stream, workerPermissions, discoveryPermissions, invoke, requireWorkerModel,
+  toolOutputPattern, readableJson, discoveryFailureText } from './core.mjs';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +17,53 @@ test('model binding is explicit and deny-by-default covers every other tool', ()
   assert.equal(workerPermissions[0].effect, 'deny');
   assert.equal(workerPermissions[0].action, '*');
   assert.deepEqual(workerPermissions.filter(r=>r.effect==='allow').map(r=>r.action), ['matchflow_worker']);
+});
+
+// Mirrors OpenCode's documented rule semantics: whole-value wildcards, last match wins.
+function permitted(rules, action, resource) {
+  const match = (pattern, value) => new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i').test(value);
+  const normalized = resource.replace(/\\/g, '/');
+  let effect = 'ask';
+  for (const rule of rules) if (match(rule.action, action) && match(rule.resource, normalized)) effect = rule.effect;
+  return effect;
+}
+
+test('discovery may read only saved oversized tool results', () => {
+  assert.equal(toolOutputPattern({}, 'C:\\Users\\someone'), 'C:/Users/someone/.local/share/opencode/tool-output/*');
+  assert.equal(toolOutputPattern({XDG_DATA_HOME:'/data/'}, '/home/x'), '/data/opencode/tool-output/*');
+  const saved = toolOutputPattern().slice(0, -1) + 'tool_1c49c0c18001example';
+  assert.equal(permitted(discoveryPermissions, 'read', saved), 'allow');
+  assert.equal(permitted(discoveryPermissions, 'external_directory', toolOutputPattern()), 'allow');
+  for (const [action, resource] of [['read', '/workspace/keys/f3decomp.key'], ['read', 'matchflow.local.json'],
+      ['read', toolOutputPattern().slice(0, -2)], ['read', toolOutputPattern().replace('tool-output/*', 'opencode.db')],
+      ['external_directory', '/workspace/*'], ['edit', saved], ['grep', '*'], ['shell', 'cat ' + saved],
+      ['f3decomp_claim', '*'], ['subagent', 'general']]) {
+    assert.equal(permitted(discoveryPermissions, action, resource), 'deny', `${action} ${resource}`);
+  }
+  for (const action of ['read', 'external_directory', 'edit']) {
+    assert.equal(permitted(workerPermissions, action, saved), 'deny');
+  }
+});
+
+test('discovery results are line-split so saved files stay readable', () => {
+  const functions = Array.from({length:500}, (_, i) => ({address:'0x' + (0x400000 + i * 16).toString(16).padStart(8, '0'),
+    size:200, band:'<=255', earlier_claims:0, give_ups:i % 3, failed_verifications:0, near_misses:0,
+    open_problem_reports:0, file_problem_reports:1}));
+  const value = {order:'give_ups', flagged_note:'x'.repeat(400), functions, next:'cursor'};
+  const text = readableJson(value);
+  assert.deepEqual(JSON.parse(text), value);
+  assert.ok(text.split('\n').length > 500);
+  assert.ok(Math.max(...text.split('\n').map(line => line.length)) < 2000);
+  for (const small of [{}, [], null, 3, 'x', {a:[]}, {receipt:{nested:[1, {b:'c'.repeat(1300)}]}}]) {
+    assert.deepEqual(JSON.parse(readableJson(small)), small);
+  }
+});
+
+test('discovery failure tells the parent to cancel, not fall back', () => {
+  const text = discoveryFailureText('nov10-s3');
+  assert.match(text, /CANCELLED/);
+  assert.match(text, /Do not screen, prepare, dispatch, open another stream or launch/);
 });
 
 test('real child is bound and claimed before first prompt; no model-selected identity', async () => {

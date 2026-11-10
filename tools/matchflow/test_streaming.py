@@ -489,6 +489,50 @@ class StreamingTests(unittest.TestCase):
         self.assertEqual(len(life.manifest(self.folder)['tasks']), 2)
         self.assertEqual(self.api.count('claim'), 2)
 
+    def test_failed_discovery_cancels_request_without_fallback_runs(self):
+        self.open()
+        self.discover('catalog')
+        # The producer exits without finish, as in the unreadable-catalog incident.
+        self.assertEqual(broker.stream_call(dict(op='producer_end', batch=self.name, parent=self.parent)),
+                         dict(cleanup_required=True))
+        self.assertEqual(streaming.cancelled_runs(self.parent), [self.name])
+        with self.assertRaisesRegex(ValueError, 'request cancelled'):
+            streaming.open_run('offline-fallback', 1, self.parent, model='offline/model#high')
+        self.assertFalse(batch.batch_path('offline-fallback').exists())
+        with self.assertRaisesRegex(ValueError, 'request cancelled'):
+            broker.task('offline-prepared', 'worker01', self.parent)
+        self.require.assert_called_once_with()
+        self.assertEqual(self.api.count('claim'), 0)
+        # Another human request in a new session is not affected.
+        self.assertEqual(streaming.cancelled_runs('ses_otherparent'), [])
+        streaming.open_run('offline-new-session', 1, 'ses_otherparent', model='offline/model#high')
+
+    def test_host_fail_and_watchdog_failures_also_cancel(self):
+        self.open()
+        broker.stream_call(dict(op='fail', batch=self.name, parent=self.parent))
+        self.assertEqual(streaming.cancelled_runs(self.parent), [self.name])
+        self.parent = 'ses_parenttwo'
+        self.producer = 'ses_discoverytwo'
+        self.name = 'offline-stream-two'
+        self.folder = batch.batch_path(self.name)
+        self.open()
+        self.update_control(heartbeat=life.time.monotonic())
+        with life.transaction(self.folder) as db:
+            value = streaming.control(db)
+            value['stream']['producer_heartbeat'] = life.time.monotonic()-31
+            streaming.put_control(db, value)
+            self.assertEqual(streaming.supervise(db, self.folder), 'producer_controller_lost')
+        self.assertEqual(streaming.cancelled_runs(self.parent), [self.name])
+
+    def test_finished_run_does_not_cancel_later_requests(self):
+        self.open(requested=1)
+        self.discover('catalog')
+        self.discover('finish', dict(reason='reviewed shortlist exhausted'))
+        self.assertEqual(broker.stream_call(dict(op='producer_end', batch=self.name, parent=self.parent)),
+                         dict(cleanup_required=False))
+        self.assertEqual(streaming.cancelled_runs(self.parent), [])
+        streaming.open_run('offline-later', 1, self.parent, model='offline/model#high')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -58,6 +58,7 @@ def open_run(name, requested, parent, model=None, backlog=2):
     session_id(parent)
     if type(requested) is not int or not 1 <= requested <= 50 or type(backlog) is not int or not 1 <= backlog <= 4:
         raise ValueError('requested 1..50 and backlog 1..4 required')
+    require_not_cancelled(parent)
     require()
     model = worker_model(model)
     with closing(registry()) as db:
@@ -65,6 +66,8 @@ def open_run(name, requested, parent, model=None, backlog=2):
             raise ValueError('workers cannot open streams')
     folder = private_root(batch.batch_path(name))
     folder.mkdir(exist_ok=False, parents=True)
+    with closing(registry()) as db, db:
+        db.execute('INSERT INTO stream_runs VALUES(?,?)', (str(folder), parent))
     life.save(folder/'batch.json', dict(schema_version=3, batch=name, streaming=True,
               created=life.stamp(), model=model, tasks=[]))
     life.dispatch(folder, 'subagents')
@@ -86,6 +89,40 @@ def open_run(name, requested, parent, model=None, backlog=2):
                                     '--token', token], stdout=out, stderr=out)
     life.save(folder/'launch.json', dict(method='subagents', watchdog_pid=process.pid))
     return dict(batch=name, requested=requested, model=model)
+
+
+def cancelled_runs(parent):
+    """Streaming runs of this parent whose discovery or startup failed.
+
+    A failed run cancels the human's whole request in that parent session: no
+    fallback screening, prepared batch, replacement stream or matching launch.
+    Successful or exhausted runs do not cancel anything.
+    """
+    from broker import registry, session_id
+    session_id(parent)
+    with closing(registry()) as db:
+        folders = [row[0] for row in db.execute('SELECT folder FROM stream_runs WHERE parent=?', (parent,))]
+    failed = []
+    for folder in map(Path, folders):
+        try:
+            with life.transaction(folder) as db:
+                value = control(db)
+        except Exception:
+            # An unreadable run is not proof of health: treat it as failed.
+            failed.append(folder.name)
+            continue
+        if value['stream']['producer_state'] == 'failed':
+            failed.append(folder.name)
+    return failed
+
+
+def require_not_cancelled(parent):
+    failed = cancelled_runs(parent)
+    if failed:
+        raise ValueError('matching request cancelled: streaming run %s failed in this session. '
+                         'Reconcile it, report the blocker to the human and do not fall back to '
+                         'screening, prepared batches or another stream; start a new session for '
+                         'a new request after the cause is fixed' % ', '.join(sorted(failed)))
 
 
 def folder_for(session, producer=False):

@@ -1,13 +1,46 @@
 import { spawn } from 'node:child_process';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export const workerPermissions = [
   { action: '*', resource: '*', effect: 'deny' },
   { action: 'matchflow_worker', resource: '*', effect: 'allow' },
 ];
+
+// OpenCode saves oversized tool results here and tells the model to read the file.
+// Discovery may read only those saved results, never the workspace, keys or packs.
+export function toolOutputPattern(env = process.env, home = homedir()) {
+  const data = env.XDG_DATA_HOME || join(home, '.local', 'share');
+  return join(data, 'opencode', 'tool-output').replace(/\\/g, '/').replace(/\/+$/, '') + '/*';
+}
+export const discoveryReadTools = ['read'];
 export const discoveryPermissions = [
   { action: '*', resource: '*', effect: 'deny' },
   { action: 'matchflow_discovery', resource: '*', effect: 'allow' },
+  { action: 'external_directory', resource: toolOutputPattern(), effect: 'allow' },
+  { action: 'read', resource: toolOutputPattern(), effect: 'allow' },
 ];
+
+// One JSON value per line where possible: OpenCode's read tool cuts lines at 2000
+// characters, so a single-line 100 KB catalog saved to a file would be unreadable.
+export function readableJson(value, indent = '') {
+  const flat = JSON.stringify(value);
+  if (flat === undefined || flat.length <= 1000 || value === null || typeof value !== 'object') return flat ?? 'null';
+  const next = indent + ' ';
+  if (Array.isArray(value)) {
+    if (!value.length) return '[]';
+    return '[\n' + value.map(item => next + readableJson(item, next)).join(',\n') + '\n' + indent + ']';
+  }
+  const entries = Object.entries(value).filter(([, item]) => item !== undefined && typeof item !== 'function');
+  if (!entries.length) return '{}';
+  return '{\n' + entries.map(([key, item]) => next + JSON.stringify(key) + ':' + readableJson(item, next)).join(',\n')
+    + '\n' + indent + '}';
+}
+
+export const discoveryFailureText = batch =>
+  `Matchflow ${batch} discovery failed; the requested matching run is CANCELLED. STOP, reconcile only this run's `
+  + 'durable claims and workers, and report the blocker to the human. Do not screen, prepare, dispatch, open another '
+  + 'stream or launch any matching worker as a fallback; the host refuses new runs from this session.';
 
 export function modelRef(model) {
   if (typeof model !== 'string' || !/^[^/\s#]+\/[^\s#]+(?:#[^/\s#]+)?$/.test(model)) throw new Error('Explicit provider/model[#variant] required');
@@ -42,7 +75,7 @@ export async function requireWorkerModel(ctx, selection) {
 export async function workerContext(event, host) {
   if (event.agent === 'match-discovery') {
     for (const name of Object.keys(event.tools)) {
-      if (name !== 'matchflow_discovery') delete event.tools[name];
+      if (name !== 'matchflow_discovery' && !discoveryReadTools.includes(name)) delete event.tools[name];
     }
     const state = await host('discovery', {session:event.sessionID, op:'status', data:{}});
     const expected = modelRef(state.model);
@@ -181,7 +214,7 @@ export async function stream(ctx, host, input, context) {
           clearInterval(pulse);
           try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* watchdog lease catches process loss */ }
           try { await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:
-            `Matchflow ${input.batch} producer supervision failed; reconcile, never resume.`}); } catch { /* durable monitor owns wake-up */ }
+            discoveryFailureText(input.batch)}); } catch { /* durable monitor owns wake-up */ }
         } finally { pulsing = false; }
       },10000);
       pulse.unref?.();
@@ -190,16 +223,16 @@ export async function stream(ctx, host, input, context) {
         agent:'match-discovery',model,permissions:discoveryPermissions});
       await host('stream',{op:'bind',batch:input.batch,parent:parent.id,session:child.id},context.signal);
       await ctx.session.prompt({sessionID:child.id,text:
-        `Discover and secure ${result.requested} reviewed functions for this bound run. Use only matchflow_discovery. Start with catalog, inspect final candidates, then enqueue with evidence-backed reason/review. Stream each claim immediately. On backpressure use wait, not repeated status polling. Stop when producer_state is done. If bounded search is exhausted, finish with the actual reason. Never retry ambiguous mutations.`});
+        `Discover and secure ${result.requested} reviewed functions for this bound run. Use matchflow_discovery for every operation. If a matchflow_discovery result was saved to a file because it was too large, use read with offset/limit on that exact saved path only; read nothing else. Start with catalog, inspect final candidates, then enqueue with evidence-backed reason/review. Stream each claim immediately. On backpressure use wait, not repeated status polling. Stop when producer_state is done. If bounded search is exhausted, finish with the actual reason. Never retry ambiguous mutations.`});
       void ctx.session.wait({sessionID:child.id}).then(async()=>{
         clearInterval(pulse);
         const ended = await host('stream',{op:'producer_end',batch:input.batch,parent:parent.id});
         if (ended.cleanup_required) await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:
-          `Matchflow ${input.batch} discovery ended unexpectedly; STOP and reconcile durable claims, never relaunch.`});
+          discoveryFailureText(input.batch)});
       }).catch(async()=>{
         clearInterval(pulse);
         try { await host('stream',{op:'fail',batch:input.batch,parent:parent.id}); } catch { /* controller lease expires */ }
-        try { await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:`Matchflow ${input.batch} discovery failed; reconcile.`}); } catch { /* durable monitor owns wake-up */ }
+        try { await ctx.session.prompt({sessionID:parent.id,delivery:'queue',text:discoveryFailureText(input.batch)}); } catch { /* durable monitor owns wake-up */ }
       });
       return {...result,discoverySessionID:child.id,monitor:`python tools/matchflow/batch.py monitor ${input.batch}`};
     } catch (error) {

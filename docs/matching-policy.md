@@ -57,6 +57,15 @@ The external workspace stores official dependencies and private runtime artifact
   `match-worker` without an extra claim. Status is read-only. Consumer assigned N and
   worker closure are separate milestones. Startup failures latch STOP and require
   explicit reconciliation; there are no replacement/refill or automatic resume paths.
+- A failed streaming run (producer ended without finish, lost supervision, stopped
+  launch) cancels the whole requested run. The orchestrator reconciles that run's
+  claims/workers only and reports the blocker. It never falls back to its own
+  screening, a prepared batch or another stream; the host enforces this by refusing
+  stream opens and prepared launches from that parent session. Successful or exhausted
+  runs do not cancel. A new human request starts in a new session.
+- Discovery may read OpenCode's saved oversized tool results (read-only, that
+  directory only) when a `matchflow_discovery` response is offloaded to a file. It
+  has no other file, shell or service access.
 - Keep `batch.json` immutable and tasks append-only in `stream_tasks`. Use
   `lifecycle.manifest` for the combined header/task view. Check the frozen configuration
   fingerprint during the run; never rerun preflight against active workers or alter

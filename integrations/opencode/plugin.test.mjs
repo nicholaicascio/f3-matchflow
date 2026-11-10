@@ -39,10 +39,11 @@ test('worker request rejects unbound identity and silent model failover before g
   await assert.rejects(workerContext(event,async()=>{throw new Error('unbound');}),/unbound/);
 });
 
-test('discovery hook strips every broad tool and rejects model failover',async()=>{
+test('discovery hook keeps only discovery and scoped read, and rejects model failover',async()=>{
   const event={sessionID:'ses_discovery',agent:'match-discovery',model:{providerID:'p',id:'m'},
-    tools:{shell:{},execute:{},subagent:{},matchflow_stream:{},matchflow_worker:{},matchflow_discovery:{}}};
+    tools:{shell:{},execute:{},subagent:{},read:{},grep:{},glob:{},edit:{},write:{},webfetch:{},
+      matchflow_stream:{},matchflow_worker:{},matchflow_discovery:{}}};
   await workerContext(event,async()=>({model:'p/m'}));
-  assert.deepEqual(Object.keys(event.tools),['matchflow_discovery']);
+  assert.deepEqual(Object.keys(event.tools).sort(),['matchflow_discovery','read']);
   await assert.rejects(workerContext(event,async()=>({model:'other/m'})),/model changed/);
 });

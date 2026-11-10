@@ -37,6 +37,9 @@ def registry():
         UNIQUE(folder, worker))''')
     db.execute('''CREATE TABLE IF NOT EXISTS discoveries (
         session TEXT PRIMARY KEY, folder TEXT NOT NULL UNIQUE, parent TEXT NOT NULL)''')
+    # Every streaming run's owner, so a failed run cancels its parent's request.
+    db.execute('''CREATE TABLE IF NOT EXISTS stream_runs (
+        folder TEXT PRIMARY KEY, parent TEXT NOT NULL)''')
     db.commit()
     return db
 
@@ -83,6 +86,9 @@ def bind(name, worker, session, parent):
 
 def task(name, worker, parent):
     session_id(parent)
+    import streaming
+    # A failed streaming run cancels the request; prepared launches are no fallback.
+    streaming.require_not_cancelled(parent)
     from preflight import require
     require()
     if not re.fullmatch(r'worker[0-9]{2,3}', worker):

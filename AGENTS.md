@@ -47,6 +47,12 @@ and explicit reconciliation, never replacement or ambiguous mutation retries. Ke
 immutable `batch.json` header and append-only `stream_tasks`; use `lifecycle.manifest`
 for the combined view. The reviewed prepare/dispatch path remains available.
 
+If discovery fails (the producer ends without finishing, its supervision is lost or the
+run is stopped), the human's matching request is cancelled. Reconcile that run's claims
+and workers only, then report the blocker to the human. Never fall back to your own
+screening, a prepared batch or another stream: the host refuses new runs and prepared
+launches from that parent session. A new request starts in a new session.
+
 Use `operator_cli.py` for status snapshots, review templates/evidence-backed selections,
 and bounded read-only ledger/lifecycle inspection; use `batch.py audit-worker` and
 `debrief` for closure summaries. Do not reimplement these steps as temp-folder scripts.
