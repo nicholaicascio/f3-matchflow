@@ -27,9 +27,11 @@ def local_history(path, address):
                 note='Local records only; absence is not proof of clean complete service history.')
 
 
-def screen(output, count=8, max_size=1023, max_pages=2, api=request):
+def screen(output, count=8, max_size=1023, max_pages=2, order='give_ups', api=request):
     if type(count) is not int or not 1 <= count <= 50 or not 1 <= max_pages <= 10 or max_size <= 0:
         raise ValueError('count 1..50, pages 1..10 and positive max-size required')
+    if order not in ('give_ups', 'size', 'returned'):
+        raise ValueError('order must be give_ups, size or returned')
     output = private_root(output)
     if output.exists():
         raise ValueError('screen output already exists; preserve prior review evidence')
@@ -52,7 +54,7 @@ def screen(output, count=8, max_size=1023, max_pages=2, api=request):
     held = {c['address'] for c in status.get('open_claims', [])}
     candidates, cursor, seen_cursors = {}, None, set()
     for page in range(max_pages):
-        body = dict(order='give_ups', limit=500, include_held=False)
+        body = dict(order=order, limit=500, include_held=False)
         if cursor:
             body['cursor'] = cursor
         listing = read('list_functions', body, 'page-%02d.json' % (page+1))
@@ -100,6 +102,8 @@ def main():
     parser.add_argument('--count', type=int, default=8)
     parser.add_argument('--max-size', type=int, default=1023)
     parser.add_argument('--max-pages', type=int, default=2)
+    parser.add_argument('--order', choices=('give_ups', 'size', 'returned'), default='give_ups',
+                        help='catalog page order for the candidate pool; the shortlist itself still prefers least-tried functions')
     args = parser.parse_args()
     try:
         output = Path(args.output)
@@ -107,7 +111,8 @@ def main():
             output = workspace_root()/'work/matchflow'/output
         if workspace_root().resolve() not in output.resolve().parents:
             raise ValueError('screening artifacts must stay inside the external workspace')
-        print(json.dumps(screen(output, args.count, args.max_size, args.max_pages), indent=2))
+        print(json.dumps(screen(output, args.count, args.max_size, args.max_pages,
+                                args.order), indent=2))
     except (ValueError, KeyError, OSError) as exc:
         parser.exit(2, str(exc)+'\n')
 

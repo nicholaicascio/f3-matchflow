@@ -54,6 +54,27 @@ class ScreenRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already exists'):
             screen.screen(self.root/'screen', api=Mock())
 
+    def test_screen_order_is_forwarded_without_excluding_sibling_reports(self):
+        bodies = []
+        def api(tool, body):
+            if tool == 'list_bands':
+                return dict(bands=[dict(band='<=255', allowed=True, open=2)])
+            if tool == 'list_functions':
+                bodies.append(dict(body))
+                return dict(functions=self.catalog(), next=None)
+            if tool == 'function_info':
+                f = next(f for f in self.catalog() if f['address'] == body['address'])
+                return dict(f, state='open', co_workers=0)
+            return dict(open_claims=[])
+        result = screen.screen(self.root/'screen', count=1, order='size', api=api)
+        self.assertEqual(result['count'], 1)
+        self.assertEqual(bodies[0]['order'], 'size')
+        self.assertNotIn('exclude_reported', bodies[0])
+        review = life.load(self.root/'screen/review.json')
+        self.assertEqual(review['shortlist'][0]['metadata']['file_problem_reports'], 1)
+        with self.assertRaisesRegex(ValueError, 'order must be'):
+            screen.screen(self.root/'screen2', order='random', api=Mock())
+
     def test_screen_cooldown_stops_and_preserves_earlier_responses(self):
         calls = []
         def api(tool, body):
