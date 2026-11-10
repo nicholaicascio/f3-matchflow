@@ -36,9 +36,11 @@ For an authorized streaming run use `matchflow_stream` open with a fresh batch n
 `requested` 1..50, `backlog` 1..4 (default 2) and optional `model`. Open freezes the
 header/config fingerprint, validates the resolved model, starts the watchdog and binds
 the discovery producer. Immediately start `python tools/matchflow/batch.py monitor BATCH`
-in the background. Do not rerun preflight during an active run. Discovery is bounded to
-four catalog pages and at most 4*N shortlist inspections, with actual receipts/local
-history. Only host-validated reviewed enqueues reserve tasks and claim exact addresses.
+in the background. Do not rerun preflight during an active run. Discovery pages and
+inspects until N acknowledged claims or genuine pool exhaustion, retaining actual
+receipts/local history. There is no page, inspection-count or total discovery-time cap.
+Rejected shortlists are not exhaustion. Only host-validated reviewed enqueues reserve
+tasks and claim exact addresses.
 `matchflow_stream` next consumes one FIFO acknowledged claim and launches a bound worker
 without another claim; status is read-only. Producer_done means N acknowledged claims,
 not N consumer assignments or closures. Explicit exhaustion may end discovery short.

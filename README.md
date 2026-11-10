@@ -80,7 +80,9 @@ put private runtime data in the checkout.
   toolchain/image, service connection and notes transport, and fingerprints the matching
   configuration. The host refuses launch if the result is stale or the fingerprint no
   longer matches. See [the orchestration runbook](docs/orchestrating.md).
-- The producer reviews bounded catalog evidence through `matchflow_discovery`; the
+- The producer pages and reviews candidates through `matchflow_discovery` until the
+  requested claim quota or genuine pool exhaustion, without page, inspection-count or
+  total discovery-time caps. The
   host validates each reviewed exact target, reserves a task, claims it and queues the
   acknowledgement. Discovery may read only OpenCode's saved oversized tool results
   (`~/.local/share/opencode/tool-output/`), not workspace files or credentials.

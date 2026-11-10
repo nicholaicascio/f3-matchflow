@@ -78,7 +78,7 @@ def open_run(name, requested, parent, model=None, backlog=2):
         value = json.loads(db.execute('SELECT payload FROM control WHERE id=1').fetchone()[0])
         value['stream'] = dict(requested=requested, backlog=backlog, parent=parent,
              model=model, fingerprint=fingerprint(), producer_state='running',
-             discovery_session=None, catalog_pages=0, cursor=None, inspections=0,
+              discovery_session=None, catalog_pages=0, cursor=None, catalog_cursors=[], inspections=0,
              started=False, claimed=0, producer_heartbeat=time.monotonic(),
              producer_started=time.monotonic())
         put_control(db, value)
@@ -190,14 +190,20 @@ def discover(session, op, data, api=service.request):
                 if value['stream']['producer_state'] != 'running' or (not in_flight and pending < value['stream']['backlog']):
                     return dict(producer_state=value['stream']['producer_state'], backpressure=False)
             if time.monotonic() >= until:
-                return dict(backpressure=True, note='consumer has not freed backlog; wait again or finish')
+                return dict(backpressure=True, note='consumer has not freed backlog; wait again, not pool exhaustion')
             time.sleep(1)
     if op == 'finish':
         with life.transaction(folder) as db:
             value = control(db)
             if value['stream']['producer_state'] != 'running':
                 return dict(producer_state=value['stream']['producer_state'])
-            value['stream'].update(producer_state='done', finish_reason=str(data.get('reason', 'discovery exhausted'))[:2000])
+            stream = value['stream']
+            if not stream['catalog_pages'] or stream['cursor']:
+                raise ValueError('catalog not exhausted; continue searching until quota or pool exhaustion')
+            reason = data.get('reason')
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError('explicit pool exhaustion reason required')
+            stream.update(producer_state='done', finish_reason=reason[:2000])
             put_control(db, value)
         return dict(producer_state='done')
     with life.transaction(folder) as db:
@@ -209,11 +215,15 @@ def discover(session, op, data, api=service.request):
             with life.transaction(folder) as db:
                 value = control(db); guard(folder, value)
                 stream = value['stream']
-                if stream['catalog_pages'] >= 4 or (stream['catalog_pages'] and not stream['cursor']):
-                    raise ValueError('bounded catalog exhausted; finish discovery')
+                if stream['catalog_pages'] and not stream['cursor']:
+                    raise ValueError('catalog exhausted; finish discovery')
                 number = stream['catalog_pages'] + 1
                 cursor = stream['cursor']
-                # Reserve read too: a crashed producer cannot expand its search bound.
+                cursors = stream.setdefault('catalog_cursors', [])
+                if cursor in cursors:
+                    raise ValueError('catalog cursor repeated; stop discovery instead of polling')
+                # Reserve each page once; never replay a lost response or cycle cursors.
+                cursors.append(cursor)
                 stream['catalog_pages'] = number
                 first = not stream['started']; stream['started'] = True
                 put_control(db, value)
@@ -235,8 +245,8 @@ def discover(session, op, data, api=service.request):
                 raise ValueError('canonical address required')
             with life.transaction(folder) as db:
                 value = control(db); guard(folder, value)
-                if not value['stream']['started'] or value['stream']['inspections'] >= value['stream']['requested']*4:
-                    raise ValueError('start catalog first; bounded shortlist inspections exhausted')
+                if not value['stream']['started']:
+                    raise ValueError('start catalog first')
                 value['stream']['inspections'] += 1; put_control(db, value)
             info = api('function_info', dict(address=address))
             receipt = dict(checked_at=life.stamp(), response=info,
@@ -359,8 +369,8 @@ def supervise(db, folder):
         started = stream.get('producer_started')
         if pulse is not None and not 0 <= now-pulse <= 30:
             reason = 'producer_controller_lost'
-        elif started is not None and not 0 <= now-started <= 2400:
-            reason = 'producer_deadline'
+        elif started is not None and now < started:
+            reason = 'producer_clock_discontinuity'
     for row in db.execute("SELECT worker FROM stream_tasks WHERE state='launching'"):
         state = life.read_worker(db,row['worker'])
         reserved = state.get('launch_reserved_monotonic')

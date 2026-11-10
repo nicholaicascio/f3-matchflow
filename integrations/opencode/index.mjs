@@ -47,7 +47,7 @@ const plugin = {
       });
       editor.add({
         name:'matchflow_discovery',
-        description:'Bound discovery producer only. catalog (at most four pages), inspect(address), enqueue(address,reason,review), wait (local backlog wait), finish(reason), status. Host claims reviewed exact targets and enqueues acknowledged claims. No shell, raw service, credentials, source inspection, child sessions or alternate run paths.',
+        description:'Bound discovery producer only. catalog (page until quota or pool exhaustion), inspect(address), enqueue(address,reason,review), wait (local backlog wait), finish(pool exhaustion reason), status. No page or inspection-count cap. Host claims reviewed exact targets and enqueues acknowledged claims. No shell, raw service, credentials, source inspection, child sessions or alternate run paths.',
         input:{type:'object',additionalProperties:false,properties:{
           op:{type:'string',enum:['catalog','inspect','enqueue','wait','finish','status']},
           data:{type:'object',additionalProperties:true},

@@ -25,6 +25,7 @@ class FakeService:
         self.pages = 0
         self.lose_claim_response = False
         self.info_overrides = {}
+        self.last_page = False
 
     def __call__(self, tool, body):
         self.calls.append((tool, deepcopy(body)))
@@ -38,7 +39,7 @@ class FakeService:
                         awaiting_verification=0)
         if tool == 'list_functions':
             self.pages += 1
-            return dict(functions=[self.info('0x00123456')], next='page%d' % self.pages)
+            return dict(functions=[self.info('0x00123456')], next=None if self.last_page else 'page%d' % self.pages)
         if tool == 'function_info':
             return deepcopy(self.info_overrides.get(body['address'], self.info(body['address'])))
         if tool == 'claim':
@@ -131,7 +132,9 @@ class StreamingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'sleep reached'):
                 life.watch(self.folder, token)
             sleep.assert_called_once_with(5)
-        self.discover('finish')
+        self.api.last_page = True
+        self.discover('catalog')
+        self.discover('finish', dict(reason='No suitable candidates remain in the pool'))
         with patch.object(life.time, 'sleep') as sleep:
             life.watch(self.folder, token)
             sleep.assert_not_called()
@@ -143,12 +146,12 @@ class StreamingTests(unittest.TestCase):
         self.popen.assert_not_called()
         self.assertFalse(self.folder.exists())
 
-    def test_catalog_required_and_bounded_to_four_pages(self):
+    def test_catalog_required_and_continues_beyond_four_pages(self):
         self.open()
         with self.assertRaisesRegex(ValueError, 'start catalog first'):
             self.discover('inspect', dict(address='0x00123456'))
         self.assertEqual(self.api.calls, [])
-        for _ in range(4):
+        for _ in range(7):
             self.discover('catalog')
         self.assertEqual([name for name, _ in self.api.calls[:4]],
                          ['start_here', 'status', 'list_bands', 'list_functions'])
@@ -156,10 +159,9 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(self.api.count(tool), 1)
         bodies = [body for tool, body in self.api.calls if tool == 'list_functions']
         self.assertEqual(bodies[0], dict(order='give_ups', limit=500, include_held=False))
-        self.assertEqual([body.get('cursor') for body in bodies], [None, 'page1', 'page2', 'page3'])
-        with self.assertRaisesRegex(ValueError, 'bounded catalog exhausted'):
-            self.discover('catalog')
-        self.assertEqual(self.api.count('list_functions'), 4)
+        self.assertEqual([body.get('cursor') for body in bodies],
+                         [None]+['page%d' % i for i in range(1, 7)])
+        self.assertEqual(self.api.count('list_functions'), 7)
 
     def test_catalog_stops_when_service_has_no_next_cursor(self):
         self.open()
@@ -172,21 +174,19 @@ class StreamingTests(unittest.TestCase):
             return result
 
         streaming.discover(self.producer, 'catalog', {}, api=last_page)
-        with self.assertRaisesRegex(ValueError, 'bounded catalog exhausted'):
+        with self.assertRaisesRegex(ValueError, 'catalog exhausted'):
             self.discover('catalog')
         self.assertEqual(self.api.count('list_functions'), 1)
 
-    def test_inspection_bound_and_canonical_addresses(self):
+    def test_inspections_continue_beyond_four_times_quota_and_require_canonical_addresses(self):
         self.open(requested=1)
         self.discover('catalog')
         for address in ('0X00123456', '0x123456', '../outside'):
             with self.subTest(address=address), self.assertRaisesRegex(ValueError, 'canonical'):
                 self.discover('inspect', dict(address=address))
-        for _ in range(4):
-            self.discover('inspect', dict(address='0x00123456'))
-        with self.assertRaisesRegex(ValueError, 'bounded shortlist'):
-            self.discover('inspect', dict(address='0x00123457'))
-        self.assertEqual(self.api.count('function_info'), 4)
+        for i in range(13):
+            self.discover('inspect', dict(address='0x%08x' % (0x00123456+i)))
+        self.assertEqual(self.api.count('function_info'), 13)
         self.assertEqual(self.api.count('claim'), 0)
 
     def test_inspect_review_enqueue_first_claim_reaches_done(self):
@@ -216,6 +216,65 @@ class StreamingTests(unittest.TestCase):
         self.assertIn('claim_ack_utc', state)
         with self.assertRaisesRegex(ValueError, 'producer finished'):
             self.discover('enqueue', self.review('0x00123457'))
+
+    def test_quota_reached_after_searching_beyond_old_limits(self):
+        self.open(requested=1)
+        for i in range(6):
+            self.discover('catalog')
+            for j in range(3):
+                address = '0x%08x' % (0x00123456+3*i+j)
+                self.discover('inspect', dict(address=address))
+        result = self.discover('enqueue', self.review(address))
+        self.assertEqual(result['address'], address)
+        self.assertEqual(self.api.count('claim'), 1)
+        self.assertEqual(self.discover('status')['producer_state'], 'done')
+
+    def test_finish_requires_catalog_exhaustion_and_explicit_reason(self):
+        self.open()
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, 'catalog not exhausted'):
+                self.discover('finish', dict(reason='shortlist rejected'))
+            self.discover('catalog')
+        self.api.last_page = True
+        self.discover('catalog')
+        with self.assertRaisesRegex(ValueError, 'explicit pool exhaustion reason'):
+            self.discover('finish')
+        self.assertEqual(self.discover('status')['producer_state'], 'running')
+        self.discover('finish', dict(reason='All catalog candidates reviewed or excluded'))
+        self.assertEqual(self.discover('status')['producer_state'], 'done')
+        self.assertEqual(self.api.count('claim'), 0)
+
+    def test_repeated_cursor_does_not_repeat_service_page(self):
+        self.open()
+        def api(tool, body):
+            result = self.api(tool, body)
+            if tool == 'list_functions':
+                result['next'] = 'cycle'
+            return result
+        for _ in range(2):
+            streaming.discover(self.producer, 'catalog', {}, api=api)
+        with self.assertRaisesRegex(ValueError, 'cursor repeated'):
+            streaming.discover(self.producer, 'catalog', {}, api=api)
+        self.assertEqual(self.api.count('list_functions'), 2)
+
+    def test_supervised_discovery_has_no_total_time_cutoff(self):
+        self.open()
+        with life.transaction(self.folder) as db:
+            value = streaming.control(db)
+            value['stream']['producer_started'] = life.time.monotonic()-86400
+            streaming.put_control(db, value)
+            self.assertIsNone(streaming.supervise(db, self.folder))
+        self.assertEqual(self.discover('status')['producer_state'], 'running')
+        self.assertFalse((self.folder/'STOP').exists())
+
+    def test_producer_clock_discontinuity_still_stops_discovery(self):
+        self.open()
+        with life.transaction(self.folder) as db:
+            value = streaming.control(db)
+            value['stream']['producer_started'] = life.time.monotonic()+100
+            streaming.put_control(db, value)
+            self.assertEqual(streaming.supervise(db, self.folder), 'producer_clock_discontinuity')
+        self.assertTrue((self.folder/'STOP').exists())
 
     def test_duplicate_reservation_is_not_replayed(self):
         self.open()
@@ -465,6 +524,7 @@ class StreamingTests(unittest.TestCase):
 
     def test_finish_records_exhaustion_and_queued_work_is_still_consumable(self):
         self.open(requested=3)
+        self.api.last_page = True
         self.discover('catalog')
         self.enqueue()
         self.assertEqual(self.discover('finish', dict(reason='reviewed shortlist exhausted')),
@@ -567,6 +627,7 @@ class StreamingTests(unittest.TestCase):
 
     def test_finished_run_does_not_cancel_later_requests(self):
         self.open(requested=1)
+        self.api.last_page = True
         self.discover('catalog')
         self.discover('finish', dict(reason='reviewed shortlist exhausted'))
         self.assertEqual(broker.stream_call(dict(op='producer_end', batch=self.name, parent=self.parent)),

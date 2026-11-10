@@ -48,17 +48,21 @@ notification, keeping the parent available for its events:
 python tools/matchflow/batch.py monitor BATCH
 ```
 
-The producer uses `matchflow_discovery` catalog (initial start_here/status/list_bands,
-at most four catalog pages), then inspect on a shortlist of at most 4*N targets for
-requested N. Inspect preserves actual receipts and local history. Review availability,
+The producer uses `matchflow_discovery` catalog (initial start_here/status/list_bands),
+then pages and inspects until N acknowledged claims or genuine pool exhaustion.
+There is no page, inspection-count or total discovery-time cap. Inspect preserves
+actual receipts and local history. Review availability,
 ownership, substantive history, verdicts and report scope under policy, including a
 next experiment and integration plan where required. No claim is taken just to screen.
 
 Producer enqueue sends the exact address, reason and review. The host validates facts
 and fresh metadata, reserves the task, claims that exact address, saves acknowledgement
 and queues it. Pre-claim unavailability may be skipped without counting toward N.
-Producer wait is a bounded local backlog wait; finish explicitly records exhaustion;
-status is read-only. Exhaustion may end the run short rather than expanding bounds.
+Producer wait is a bounded local backlog wait, not service polling. Rejected candidates
+do not justify finishing short: continue searching. Finish records genuine pool exhaustion
+after all potentially suitable candidates are reviewed or excluded on evidence. Never
+restart the catalog or poll for new availability; repeated cursors are a failure.
+Status is read-only. Genuine exhaustion may end the run short.
 
 As queued claims become available, call:
 

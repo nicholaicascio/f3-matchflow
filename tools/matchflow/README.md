@@ -110,8 +110,10 @@ session permissions and the request hook all allow exactly that. Discovery resul
 written one JSON value per line so a saved catalog page stays readable, because
 OpenCode's `read` truncates lines at 2000 characters.
 
-- `catalog`: initial start_here/status/list_bands, then at most four catalog pages.
-- `inspect`: exact `address` on a shortlist bounded by 4*N for requested N. Preserve
+- `catalog`: initial start_here/status/list_bands, then page until quota or pool exhaustion.
+  No page cap; repeated cursors fail rather than restarting or polling the catalog.
+- `inspect`: exact `address`; no inspection-count cap. Continue searching after unsuitable
+  candidates until the requested claim quota is secured or the pool is exhausted. Preserve
   actual service receipts and relevant local history; review substantive attempts,
   ownership, availability, verdicts and report scope under canonical policy.
 - `enqueue`: `address`, `reason`, `review`. The host validates review facts and fresh
@@ -119,7 +121,8 @@ OpenCode's `read` truncates lines at 2000 characters.
   then queues it. Concrete next experiments and prior-unfit integration plans remain
   required under the same review contract as prepared selections.
 - `wait`: bounded local backlog wait, not remote polling or an expanded search budget.
-- `finish`: explicit exhaustion with `reason`; a bounded search may finish short.
+- `finish`: genuine pool exhaustion with `reason`, after all potentially suitable candidates
+  have been reviewed or excluded on evidence. Rejected shortlists are not exhaustion.
 - `status`: read-only producer/run state.
 
 Unavailability discovered before claiming can be skipped and does not count toward the
@@ -258,7 +261,8 @@ Changing the local setting affects new batches only, never immutable prepared as
 
 The plugin renews a durable producer-controller heartbeat every ten seconds. The
 independent watchdog stops the run after thirty seconds without renewal, even if
-no matching workers exist; discovery also has a forty-minute total bound. A FIFO
+no matching workers exist. Discovery has no total-time cutoff while supervised;
+worker experiment/closure deadlines remain unchanged. A FIFO
 launch reservation abandoned for two minutes latches STOP. A lost `next` response
 requests STOP immediately, never another dequeue. These deadlines do not renew
 claim leases or worker experiment budgets.

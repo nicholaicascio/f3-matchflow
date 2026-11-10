@@ -226,6 +226,11 @@ test('stream open binds restricted producer before first prompt without claiming
   assert.equal(calls[1][1].agent,'match-discovery');
   assert.deepEqual(calls[1][1].permissions,discoveryPermissions);
   assert.equal(calls[2][1].op,'bind');
+  const prompt=calls[3][1].text;
+  assert.match(prompt,/Continue paging and inspecting until the quota is secured/);
+  assert.match(prompt,/no page, inspection-count or total discovery-time cap/);
+  assert.match(prompt,/Finish short only when the catalog has no next page/);
+  assert.doesNotMatch(prompt,/bounded search/);
 });
 
 test('stream next hands off preclaimed task and suppresses routine child completion prompts',async()=>{

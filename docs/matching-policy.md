@@ -43,15 +43,19 @@ The external workspace stores official dependencies and private runtime artifact
   The parent immediately starts `python tools/matchflow/batch.py monitor BATCH` in the
   background. Neither setup nor documentation/offline tests authorize opening a run.
 - Only that producer uses `matchflow_discovery`: catalog starts with start_here, status
-  and list_bands, then at most four catalog pages; inspect reviews a shortlist bounded
-  by 4*N for requested N, retaining service receipts and local history. The same review,
+  and list_bands, then pages and inspects until the quota or genuine pool exhaustion.
+  There is no page, inspection-count or total discovery-time cap. Retain actual service
+  receipts and local history. The same review,
   report-scope, prior-unfit and concrete-experiment requirements apply as above.
 - Enqueue supplies address, reason and review. The trusted host validates review facts
   and fresh metadata, reserves the task, claims the exact address and saves its
   acknowledgement before queuing it. Unavailability before a claim may be skipped and
   does not count toward N. Never retry an ambiguous mutation or replace a claimed task.
-- Discovery wait is a bounded local backlog wait, not service polling or extra screening.
-  Finish records explicit exhaustion. Status is read-only. `producer_done` at quota
+- Discovery wait is a bounded local backlog wait, not service polling.
+  Finish records genuine pool exhaustion after all potentially suitable candidates are
+  reviewed or excluded on evidence, not a rejected shortlist or elapsed search budget.
+  Never restart the catalog or poll for new availability; repeated cursors are a failure.
+  Status is read-only. `producer_done` at quota
   means N acknowledged claims, not N consumer assignments; exhaustion can end short.
 - `matchflow_stream` next consumes one FIFO acknowledged claim and launches its bound
   `match-worker` without an extra claim. Status is read-only. Consumer assigned N and
