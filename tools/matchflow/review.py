@@ -36,6 +36,20 @@ def _legacy_facts(target):
     )
 
 
+def merged_prior_verdicts(facts_value, known):
+    """Prior verdicts plus actual local ones, without raising on a malformed shape.
+
+    The value is recorded for `normalized` to reject with its own message; an
+    agent-supplied null or non-string list must never surface as a host TypeError.
+    """
+    prior = facts_value.get('prior_verdicts')
+    if prior is None and 'prior_verdicts' not in facts_value:
+        prior = []
+    if not isinstance(prior, list) or not all(isinstance(v, str) for v in prior):
+        return prior
+    return sorted(set(prior + list(known)))
+
+
 def facts(target):
     """Return normalized review facts, rejecting an ambiguous lane/review mix."""
     if not isinstance(target, dict):

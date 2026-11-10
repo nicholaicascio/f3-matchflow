@@ -341,6 +341,21 @@ class StreamingTests(unittest.TestCase):
             self.assertEqual(self.api.count('claim'), 0)
             self.assertEqual(life.manifest(self.folder)['tasks'], [])
 
+    def test_malformed_prior_verdicts_fails_clearly_before_reservation_or_claim(self):
+        self.open()
+        self.discover('catalog')
+        self.discover('inspect', dict(address='0x00123456'))
+        for bad in (None, 'unfit', [{'verdict': 'unfit'}], [1]):
+            payload = self.review()
+            payload['review']['prior_verdicts'] = bad
+            with self.subTest(prior_verdicts=bad), self.assertRaisesRegex(ValueError, 'prior_verdicts'):
+                self.discover('enqueue', payload)
+            self.assertEqual(self.api.count('claim'), 0)
+            self.assertEqual(life.manifest(self.folder)['tasks'], [])
+        result = self.discover('enqueue', self.review())
+        self.assertIn('claim_id', result)
+        self.assertEqual(self.api.count('claim'), 1)
+
     def test_lost_claim_response_leaves_cleanup_barrier_and_never_retries(self):
         self.open()
         self.discover('catalog')

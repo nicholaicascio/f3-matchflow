@@ -47,6 +47,16 @@ class BatchTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'worker_model'):
                     batch.prepare('invalid', selection)
 
+    def test_malformed_prior_verdicts_is_a_clear_value_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            selection = root/'selection.json'
+            batch.save(selection, self.selection(review=dict(prior_verdicts=None)))
+            with patch.object(batch, 'ROOT', root), patch.object(batch, 'BATCHES', root/'batches'):
+                with self.assertRaisesRegex(ValueError, 'prior_verdicts'):
+                    batch.prepare('malformed', selection)
+            self.assertFalse((root/'batches/malformed').exists())
+
     def test_valid_selection(self):
         targets = batch.validate_selection(self.selection())
         self.assertEqual(len(targets), 1)

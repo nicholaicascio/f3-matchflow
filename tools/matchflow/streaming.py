@@ -294,7 +294,8 @@ def enqueue(folder, data, api):
         if any(r.get('state') == 'unfit' for r in receipt['local_history'].get('attempts', [])):
             known.append('unfit')
         if isinstance(target['review'], dict):
-            target['review']['prior_verdicts'] = sorted(set(target['review'].get('prior_verdicts', [])+known))
+            target['review']['prior_verdicts'] = review.merged_prior_verdicts(
+                target['review'], known)
         batch.validate_selection(dict(checked_at=receipt['checked_at'], targets=[target]))
         seq = db.execute('SELECT coalesce(max(seq),0)+1 FROM stream_tasks').fetchone()[0]
         worker = 'worker%02d' % seq

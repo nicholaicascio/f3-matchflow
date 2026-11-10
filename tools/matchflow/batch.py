@@ -102,10 +102,10 @@ def prepare(name, selection_path, model=None):
                                    (target['address'],)).fetchall()
                 known = sorted(set(r[0] for r in rows))
                 if 'review' in target:
-                    target['review']['prior_verdicts'] = sorted(
-                        set(target['review'].get('prior_verdicts', []) + known))
+                    target['review']['prior_verdicts'] = review.merged_prior_verdicts(
+                        target['review'], known)
                 else:
-                    target['prior_verdicts'] = sorted(set(target.get('prior_verdicts', []) + known))
+                    target['prior_verdicts'] = review.merged_prior_verdicts(target, known)
     targets = validate_selection(selection)
     # Render every prompt before creating any batch directory, so a fact/type or
     # template error cannot leave a partial immutable batch behind.
