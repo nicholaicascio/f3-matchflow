@@ -54,6 +54,39 @@ class ScreenRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already exists'):
             screen.screen(self.root/'screen', api=Mock())
 
+    def test_screen_size_cap_is_optional_and_tier_bands_still_apply(self):
+        for targeted in (False, True):
+            for max_size, allowed, expected in ((None, True, 1), (4096, True, 1),
+                                                (1023, True, 0), (None, False, 0)):
+                with self.subTest(targeted=targeted, max_size=max_size, allowed=allowed):
+                    candidate = dict(self.catalog()[0], size=4096, band='>=1024')
+                    def api(tool, body):
+                        if tool == 'list_bands':
+                            return dict(bands=[dict(band='>=1024', allowed=allowed, open=1)])
+                        if tool == 'list_functions':
+                            return dict(functions=[candidate], next=None)
+                        if tool == 'function_info':
+                            return dict(candidate, state='open', co_workers=0)
+                        if tool in ('start_here', 'status'):
+                            return dict(open_claims=[])
+                        raise AssertionError('unexpected mutation '+tool)
+                    output = self.root/('screen-%s-%s-%s' % (targeted, max_size, allowed))
+                    kwargs = dict(count=1, api=api)
+                    if max_size is not None:
+                        kwargs['max_size'] = max_size
+                    if targeted:
+                        kwargs['addresses'] = [candidate['address']]
+                    result = screen.screen(output, **kwargs)
+                    self.assertEqual(result['count'], expected)
+
+    def test_screen_rejects_invalid_explicit_size_cap_before_service_calls(self):
+        for max_size in (0, -1, True, '1023', 1.5):
+            with self.subTest(max_size=max_size):
+                api = Mock()
+                with self.assertRaisesRegex(ValueError, 'max-size'):
+                    screen.screen(self.root/'screen', max_size=max_size, api=api)
+                api.assert_not_called()
+
     def test_screen_order_is_forwarded_without_excluding_sibling_reports(self):
         bodies = []
         def api(tool, body):

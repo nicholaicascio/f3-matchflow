@@ -29,10 +29,11 @@ def local_history(path, address):
                 note='Local records only; absence is not proof of clean complete service history.')
 
 
-def screen(output, count=8, max_size=1023, max_pages=2, order='give_ups',
-           addresses=None, api=request):
-    if type(count) is not int or not 1 <= count <= 50 or not 1 <= max_pages <= 10 or max_size <= 0:
-        raise ValueError('count 1..50, pages 1..10 and positive max-size required')
+def screen(output, count=8, max_size=None, max_pages=2, order='give_ups',
+            addresses=None, api=request):
+    if (type(count) is not int or not 1 <= count <= 50 or not 1 <= max_pages <= 10 or
+            (max_size is not None and (type(max_size) is not int or max_size <= 0))):
+        raise ValueError('count 1..50, pages 1..10 and optional positive integer max-size required')
     if order not in ('give_ups', 'size', 'returned'):
         raise ValueError('order must be give_ups, size or returned')
     if addresses is not None:
@@ -72,7 +73,8 @@ def screen(output, count=8, max_size=1023, max_pages=2, order='give_ups',
             listing = read('list_functions', body, 'page-%02d.json' % (page+1))
             for f in listing.get('functions', []):
                 address = f.get('address')
-                if (f.get('band') in allowed and type(f.get('size')) is int and f['size'] <= max_size and
+                if (f.get('band') in allowed and type(f.get('size')) is int and
+                        (max_size is None or f['size'] <= max_size) and
                         f.get('open_problem_reports') == 0 and f.get('failed_verifications') == 0 and address not in held):
                     candidates[address] = f
             cursor = listing.get('next')
@@ -95,7 +97,7 @@ def screen(output, count=8, max_size=1023, max_pages=2, order='give_ups',
         if (info.get('address') != address or info.get('state') != 'open' or
                 co_workers(info) != 0 or info.get('open_problem_reports') != 0 or
                 info.get('failed_verifications') != 0 or type(info.get('size')) is not int or
-                info['size'] > max_size or address in held or
+                (max_size is not None and info['size'] > max_size) or address in held or
                 (addresses is not None and info.get('band') not in allowed)):
             continue
         shortlist.append(dict(metadata=info, local_history=local_history(output.parent/'ledger.sqlite3', info['address']),
@@ -120,7 +122,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True)
     parser.add_argument('--count', type=int, default=8)
-    parser.add_argument('--max-size', type=int, default=1023)
+    parser.add_argument('--max-size', type=int, default=None,
+                        help='optional maximum function size in bytes; default: all tier-allowed sizes')
     parser.add_argument('--max-pages', type=int, default=2)
     parser.add_argument('--order', choices=('give_ups', 'size', 'returned'), default='give_ups',
                         help='catalog page order for the candidate pool; the shortlist itself still prefers least-tried functions')

@@ -110,8 +110,11 @@ The official read-only sequence starts with `start_here`, `status`, `list_bands`
 that bounded sequence and saves actual responses. It never takes a screening claim:
 
 ```text
-python tools/matchflow/screen.py --output screening-01 --count 8 --max-pages 2 --max-size 1023
+python tools/matchflow/screen.py --output screening-01 --count 8 --max-pages 2
 ```
+
+Screening has no default size cap beyond service tier eligibility. Optionally pass
+`--max-size BYTES` to narrow the search.
 
 Review availability, history, known verdicts and actual report scope. An incomplete
 shortlist is not permission to expand the search indefinitely. Use actual evidence,

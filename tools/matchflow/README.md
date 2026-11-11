@@ -154,8 +154,11 @@ function_info. Review history/reports without claiming. Save fresh actual metada
 For a bounded first pass (read-only remotely, no game inspection or agents):
 
 ```text
-python tools/matchflow/screen.py --output screening-01 --count 8 --max-pages 2 --max-size 1023
+python tools/matchflow/screen.py --output screening-01 --count 8 --max-pages 2
 ```
+
+All service tier-allowed sizes are eligible by default. Use `--max-size BYTES` only
+when you want an explicit size filter.
 
 Relative outputs live under the external `work/matchflow/`. The command calls
 start_here first, then status/bands, up to two 500-entry catalog pages, and function_info
